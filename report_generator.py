@@ -1,184 +1,109 @@
-"""
-Report generation module.
-Creates structured PDF/HTML reports from incident data.
-"""
-from jinja2 import Template
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from datetime import datetime
-from typing import List, Dict
+import csv
+import json
 import os
+import zipfile
+from datetime import datetime
+from jinja2 import Template
 
 
 class ReportGenerator:
-    def __init__(self, output_dir: str = "output/reports"):
-        self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
-        self.styles = getSampleStyleSheet()
-        
-    def generate_html_report(self, incidents: List[Dict], video_path: str,
-                             metadata: Dict = None) -> str:
-        """
-        Generate an interactive HTML report.
-        
-        Args:
-            incidents: List of incident dictionaries
-            video_path: Original video path
-            metadata: Additional info (location, camera_id, etc.)
-        """
-        html_template = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>VisionGuard AI - Incident Report</title>
-            <style>
-                body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
-                .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                         color: white; padding: 30px; border-radius: 10px; margin-bottom: 30px; }
-                .incident { background: white; padding: 20px; margin-bottom: 20px; 
-                           border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-                .severity-high { border-left: 5px solid #e74c3c; }
-                .severity-medium { border-left: 5px solid #f39c12; }
-                .severity-low { border-left: 5px solid #27ae60; }
-                .timestamp { color: #666; font-size: 0.9em; }
-                .badge { padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: bold; }
-                .badge-high { background: #fee; color: #c33; }
-                .badge-medium { background: #ffeaa7; color: #d68910; }
-                .badge-low { background: #d5f5e3; color: #27ae60; }
-                .clip-info { background: #f8f9fa; padding: 10px; border-radius: 5px; margin-top: 10px; }
-                table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-                th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
-                th { background: #667eea; color: white; }
-            </style>
-        </head>
-        <body>
-            <div class="header">
-                <h1>🛡️ VisionGuard AI Incident Report</h1>
-                <p>Generated: {{ generated_at }} | Video: {{ video_name }}</p>
-                {% if metadata %}
-                <p>Location: {{ metadata.get('location', 'N/A') }} | Camera: {{ metadata.get('camera_id', 'N/A') }}</p>
-                {% endif %}
-            </div>
-            
-            <h2>Summary</h2>
-            <p>Total Incidents Detected: <strong>{{ incidents|length }}</strong></p>
-            <p>High Severity: <strong>{{ high_count }}</strong> | 
-               Medium: <strong>{{ medium_count }}</strong> | 
-               Low: <strong>{{ low_count }}</strong></p>
-            
-            <h2>Incident Details</h2>
-            {% for incident in incidents %}
-            <div class="incident severity-{{ incident.severity }}">
-                <h3>Incident #{{ loop.index }} 
-                    <span class="badge badge-{{ incident.severity }}">{{ incident.severity.upper() }}</span>
-                </h3>
-                <p class="timestamp">⏱️ {{ incident.start_time }} - {{ incident.end_time }} 
-                   (Duration: {{ incident.duration }}s)</p>
-                <p><strong>Description:</strong> {{ incident.description }}</p>
-                <p><strong>Objects Involved:</strong> {{ incident.objects | join(', ') }}</p>
-                <p><strong>Track IDs:</strong> {{ incident.track_ids | join(', ') }}</p>
-                
-                {% if incident.frame_path %}
-                <div class="clip-info">
-                    <p>📸 Key Frame: {{ incident.frame_path }}</p>
-                    {% if incident.clip_path %}
-                    <p>🎬 Extracted Clip: {{ incident.clip_path }}</p>
-                    {% endif %}
-                </div>
-                {% endif %}
-            </div>
-            {% endfor %}
-            
-            <h2>Timeline</h2>
-            <table>
-                <tr>
-                    <th>Time</th>
-                    <th>Incident</th>
-                    <th>Severity</th>
-                    <th>Objects</th>
-                </tr>
-                {% for incident in incidents %}
-                <tr>
-                    <td>{{ incident.start_time }}</td>
-                    <td>{{ incident.description[:80] }}...</td>
-                    <td><span class="badge badge-{{ incident.severity }}">{{ incident.severity }}</span></td>
-                    <td>{{ incident.objects | join(', ') }}</td>
-                </tr>
-                {% endfor %}
-            </table>
-        </body>
-        </html>
-        """
-        
-        # Count severities
-        high = sum(1 for i in incidents if i.get('severity') == 'high')
-        medium = sum(1 for i in incidents if i.get('severity') == 'medium')
-        low = sum(1 for i in incidents if i.get('severity') == 'low')
-        
-        template = Template(html_template)
-        html_content = template.render(
-            incidents=incidents,
-            video_name=os.path.basename(video_path),
-            generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            metadata=metadata or {},
-            high_count=high,
-            medium_count=medium,
-            low_count=low
+    def __init__(self, out_dir):
+        self.out_dir = out_dir
+        os.makedirs(out_dir, exist_ok=True)
+
+    def write_json(self, path, data):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return path
+
+    def write_csv(self, path, rows):
+        cols = ["rank", "score", "start", "end", "duration", "summary", "objects", "tracks", "clip"]
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols)
+            w.writeheader()
+            for i, row in enumerate(rows, 1):
+                w.writerow({
+                    "rank": i,
+                    "score": round(row.get("score", 0.0), 4),
+                    "start": round(row.get("start", 0.0), 2),
+                    "end": round(row.get("end", 0.0), 2),
+                    "duration": round(row.get("end", 0.0) - row.get("start", 0.0), 2),
+                    "summary": row.get("summary", ""),
+                    "objects": ", ".join(row.get("objects", [])),
+                    "tracks": ", ".join(str(x) for x in row.get("tracks", [])),
+                    "clip": row.get("clip", ""),
+                })
+        return path
+
+    def write_html(self, path, data):
+        tpl = Template(
+            """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>VisionGuard AI</title>
+  <style>
+    body{font-family:system-ui,sans-serif;background:#f3f5f7;color:#14202b;margin:0}
+    .wrap{max-width:1080px;margin:0 auto;padding:28px}
+    .hero{background:linear-gradient(135deg,#0f3d5e,#2d718f);color:#fff;padding:24px;border-radius:18px}
+    .card{background:#fff;border-radius:16px;padding:18px;margin-top:16px;box-shadow:0 8px 24px rgba(18,38,63,.08)}
+    .meta{color:#53606d;font-size:14px}
+    .score{font-weight:700;color:#0f3d5e}
+    table{width:100%;border-collapse:collapse;margin-top:10px}
+    th,td{padding:10px;border-bottom:1px solid #e7ecf0;text-align:left;vertical-align:top}
+    th{background:#eef4f8}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <h1>VisionGuard AI</h1>
+      <div>query: {{ q }}</div>
+      <div>video: {{ video }}</div>
+      <div>generated: {{ now }}</div>
+    </div>
+    <div class="card">
+      <h2>Top Matches</h2>
+      <table>
+        <tr>
+          <th>#</th>
+          <th>Time</th>
+          <th>Score</th>
+          <th>Summary</th>
+          <th>Objects</th>
+          <th>Clip</th>
+        </tr>
+        {% for x in hits %}
+        <tr>
+          <td>{{ loop.index }}</td>
+          <td>{{ "%.2f"|format(x.start) }}s - {{ "%.2f"|format(x.end) }}s</td>
+          <td class="score">{{ "%.4f"|format(x.score) }}</td>
+          <td>{{ x.summary }}</td>
+          <td>{{ x.objects|join(", ") }}</td>
+          <td>{{ x.clip }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+</body>
+</html>
+"""
         )
-        
-        output_path = os.path.join(self.output_dir, 
-                                   f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-            
-        return output_path
-    
-    def generate_pdf_report(self, incidents: List[Dict], video_path: str) -> str:
-        """Generate a PDF report (simplified version)."""
-        output_path = os.path.join(self.output_dir,
-                                   f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
-        
-        doc = SimpleDocTemplate(output_path, pagesize=letter)
-        story = []
-        
-        # Title
-        title_style = ParagraphStyle(
-            'CustomTitle',
-            parent=self.styles['Heading1'],
-            fontSize=24,
-            textColor=colors.HexColor('#667eea'),
-            spaceAfter=30
+        html = tpl.render(
+            q=data.get("query", ""),
+            video=data.get("video", ""),
+            now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            hits=data.get("hits", []),
         )
-        story.append(Paragraph("VisionGuard AI Incident Report", title_style))
-        story.append(Spacer(1, 12))
-        
-        # Summary table
-        data = [['#', 'Time', 'Severity', 'Description', 'Objects']]
-        for i, inc in enumerate(incidents[:50], 1):  # Limit to 50 for PDF
-            data.append([
-                str(i),
-                f"{inc['start_time']:.1f}s",
-                inc.get('severity', 'medium'),
-                inc['description'][:60] + "...",
-                ", ".join(inc.get('objects', []))[:30]
-            ])
-            
-        table = Table(data, colWidths=[0.5*inch, 1*inch, 1*inch, 3*inch, 1.5*inch])
-        table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#667eea')),
-            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTSIZE', (0, 0), (-1, 0), 12),
-            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
-            ('GRID', (0, 0), (-1, -1), 1, colors.black)
-        ]))
-        
-        story.append(table)
-        doc.build(story)
-        
-        return output_path
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        return path
+
+    def write_zip(self, path, files):
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+            for file in files:
+                if file and os.path.exists(file):
+                    z.write(file, os.path.basename(file))
+        return path

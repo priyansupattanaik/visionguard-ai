@@ -1,240 +1,286 @@
-"""
-Main processing pipeline.
-Orchestrates detection → tracking → VLM analysis → incident detection → reporting.
-"""
-import cv2
-import os
 import json
-from typing import List, Dict, Optional, Callable
+import os
+import shutil
 from datetime import datetime
-import numpy as np
-from tqdm import tqdm
 
-from detector import ObjectDetector
-from tracker import ObjectTracker
-from vlm import VLMAnalyzer
+import cv2
+import numpy as np
+
 from clip_generator import ClipGenerator
 from report_generator import ReportGenerator
+from tracker import ObjectTracker
+from vlm import SearchEncoder
 
 
 class VisionGuardPipeline:
-    def __init__(self, 
-                 yolo_model: str = "yolo11m.pt",
-                 vlm_model: str = "Qwen/Qwen2.5-VL-3B-Instruct",
-                 output_dir: str = "output",
-                 process_every_n_frames: int = 5,
-                 vlm_analyze_every_n_seconds: float = 2.0):
-        """
-        Initialize the complete pipeline.
-        
-        Args:
-            process_every_n_frames: Run detection every N frames (speed optimization)
-            vlm_analyze_every_n_seconds: Run VLM analysis every N seconds
-        """
-        self.output_dir = output_dir
-        self.process_every_n = process_every_n_frames
-        self.vlm_every_sec = vlm_analyze_every_n_seconds
-        
-        os.makedirs(f"{output_dir}/frames", exist_ok=True)
-        os.makedirs(f"{output_dir}/clips", exist_ok=True)
-        os.makedirs(f"{output_dir}/reports", exist_ok=True)
-        
-        print("[Pipeline] Initializing components...")
-        self.detector = ObjectDetector(yolo_model)
-        self.tracker = ObjectTracker(yolo_model)
-        self.vlm = VLMAnalyzer(vlm_model)
-        self.clip_gen = ClipGenerator(f"{output_dir}/clips")
-        self.report_gen = ReportGenerator(f"{output_dir}/reports")
-        
-        self.incidents = []
-        self.frame_cache = []
-        self.tracking_history = {}  # track_id -> list of positions
-        
-    def process_video(self, video_path: str, 
-                      custom_prompt: str = None,
-                      progress_callback: Callable = None,
-                      target_classes: List[int] = None) -> Dict:
-        """
-        Process a complete video file.
-        
-        Args:
-            video_path: Path to CCTV footage
-            custom_prompt: Custom VLM prompt for analysis
-            progress_callback: Function(progress_pct, status_msg)
-            target_classes: Filter specific COCO classes (e.g., [0] for person only)
-            
-        Returns:
-            Processing results dictionary
-        """
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Cannot open video: {video_path}")
-            
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = total_frames / fps
-        
-        print(f"[Pipeline] Video: {video_path}")
-        print(f"[Pipeline] Duration: {duration:.1f}s, FPS: {fps}, Frames: {total_frames}")
-        
-        frame_idx = 0
-        last_vlm_time = -999
-        
-        # Incident detection state
-        current_incident = None
-        incident_start = None
-        
-        for frame_idx in tqdm(range(total_frames), desc="Processing"):
-            ret, frame = cap.read()
-            if not ret:
-                break
-                
-            timestamp = frame_idx / fps
-            
-            # Progress update
-            if progress_callback and frame_idx % 30 == 0:
-                progress_callback((frame_idx / total_frames) * 100, 
-                                f"Processing frame {frame_idx}/{total_frames}")
-            
-            # Detection & Tracking (every N frames for speed)
-            if frame_idx % self.process_every_n == 0:
-                tracks = self.tracker.track(frame, classes=target_classes)
-                
-                # Update tracking history
-                for track in tracks:
-                    tid = track["track_id"]
-                    if tid not in self.tracking_history:
-                        self.tracking_history[tid] = []
-                    self.tracking_history[tid].append({
-                        "frame": frame_idx,
-                        "time": timestamp,
-                        "bbox": track["bbox"],
-                        "class": track["class_name"]
-                    })
-                
-                # Save keyframe if significant activity
-                if len(tracks) > 0 and frame_idx % (fps * 2) == 0:  # Every 2 seconds if activity
-                    frame_path = f"{self.output_dir}/frames/frame_{frame_idx:06d}.jpg"
-                    cv2.imwrite(frame_path, frame)
-            
-            # VLM Analysis (every N seconds)
-            if timestamp - last_vlm_time >= self.vlm_every_sec:
-                last_vlm_time = timestamp
-                
-                # Prepare prompt
-                prompt = custom_prompt or (
-                    "Analyze this CCTV frame. Identify: 1) What is happening, "
-                    "2) Any suspicious or unsafe activities, 3) Number of people/vehicles, "
-                    "4) Any incidents requiring attention. Be concise."
-                )
-                
-                try:
-                    analysis = self.vlm.analyze_frame(frame, prompt)
-                    
-                    # Simple incident detection heuristic
-                    incident_keywords = ["suspicious", "unauthorized", "theft", "fight", 
-                                       "fall", "intruder", "loitering", "crowd", "panic",
-                                       "weapon", "violence", "emergency", "unconscious"]
-                    
-                    is_incident = any(kw in analysis.lower() for kw in incident_keywords)
-                    
-                    if is_incident:
-                        if current_incident is None:
-                            current_incident = {
-                                "start_time": timestamp,
-                                "description": analysis,
-                                "severity": "medium",
-                                "frames": [],
-                                "track_ids": set(),
-                                "objects": set()
-                            }
-                            incident_start = timestamp
-                        else:
-                            current_incident["description"] += f" | {analysis}"
-                            
-                        # Capture frame
-                        frame_path = f"{self.output_dir}/frames/incident_{len(self.incidents):03d}_{frame_idx:06d}.jpg"
-                        cv2.imwrite(frame_path, frame)
-                        current_incident["frames"].append(frame_path)
-                        
-                        # Add tracks info
-                        for t in tracks:
-                            current_incident["track_ids"].add(t["track_id"])
-                            current_incident["objects"].add(t["class_name"])
-                            
-                    else:
-                        # End current incident if gap > 5 seconds
-                        if current_incident and (timestamp - incident_start > 5):
-                            current_incident["end_time"] = timestamp
-                            current_incident["duration"] = timestamp - current_incident["start_time"]
-                            current_incident["track_ids"] = list(current_incident["track_ids"])
-                            current_incident["objects"] = list(current_incident["objects"])
-                            
-                            # Severity classification
-                            if any(kw in current_incident["description"].lower() 
-                                  for kw in ["weapon", "violence", "emergency", "unconscious"]):
-                                current_incident["severity"] = "high"
-                            elif current_incident["duration"] > 30:
-                                current_incident["severity"] = "high"
-                                
-                            self.incidents.append(current_incident)
-                            current_incident = None
-                            
-                except Exception as e:
-                    print(f"[Pipeline] VLM error at {timestamp:.1f}s: {e}")
-                    continue
-        
-        # Close final incident
-        if current_incident:
-            current_incident["end_time"] = timestamp
-            current_incident["duration"] = timestamp - current_incident["start_time"]
-            current_incident["track_ids"] = list(current_incident["track_ids"])
-            current_incident["objects"] = list(current_incident["objects"])
-            self.incidents.append(current_incident)
-            
-        cap.release()
-        
-        # Generate outputs
-        print(f"[Pipeline] Detected {len(self.incidents)} incidents")
-        
-        # Extract clips
-        clips = []
-        if self.incidents:
-            clips = self.clip_gen.extract_incident_clips(video_path, self.incidents)
-            for i, clip in enumerate(clips):
-                self.incidents[i]["clip_path"] = clip["path"]
-        
-        # Generate reports
-        html_report = self.report_gen.generate_html_report(
-            self.incidents, video_path
-        )
-        
-        # Save JSON data
-        json_path = f"{self.output_dir}/incidents.json"
-        with open(json_path, 'w') as f:
-            json.dump({
-                "video": video_path,
-                "processed_at": datetime.now().isoformat(),
-                "total_incidents": len(self.incidents),
-                "incidents": self.incidents
-            }, f, indent=2, default=str)
-            
-        return {
-            "incidents": self.incidents,
-            "incident_count": len(self.incidents),
-            "html_report": html_report,
-            "json_data": json_path,
-            "clips": [c["path"] for c in clips],
-            "tracking_history": self.tracking_history
+    def __init__(self, out_dir="output", yolo="yolo11n.pt", clip_model="openai/clip-vit-base-patch32"):
+        self.out_dir = out_dir
+        self.yolo = yolo
+        self.clip_model = clip_model
+        self.trk = ObjectTracker(model=yolo)
+        self.enc = SearchEncoder(model=clip_model)
+        self.idx = None
+        self.run_dir = None
+        self.clip = None
+        self.rep = None
+        os.makedirs(out_dir, exist_ok=True)
+        self.obj_keys = {
+            "person": ["person", "people", "man", "woman", "boy", "girl", "human"],
+            "car": ["car", "sedan", "hatchback"],
+            "truck": ["truck", "lorry"],
+            "bus": ["bus"],
+            "motorcycle": ["motorcycle", "bike", "biker"],
+            "bicycle": ["bicycle", "cycle"],
+            "dog": ["dog"],
+            "cat": ["cat"],
         }
-    
-    def semantic_search(self, query: str) -> List[Dict]:
-        """
-        Search incidents by semantic description (placeholder for ChromaDB integration).
-        """
-        # Future: Integrate ChromaDB with sentence-transformers embeddings
-        results = []
-        for inc in self.incidents:
-            if query.lower() in inc["description"].lower():
-                results.append(inc)
-        return results
+        self.act_keys = {
+            "still": ["standing", "sitting", "idle", "waiting", "loitering"],
+            "move": ["walking", "running", "moving", "entering", "leaving", "crossing"],
+            "crowd": ["crowd", "group", "many people"],
+        }
+
+    def _new_run(self, video):
+        name = os.path.splitext(os.path.basename(video))[0]
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.run_dir = os.path.join(self.out_dir, f"{name}_{stamp}")
+        if os.path.exists(self.run_dir):
+            shutil.rmtree(self.run_dir)
+        os.makedirs(self.run_dir, exist_ok=True)
+        os.makedirs(os.path.join(self.run_dir, "frames"), exist_ok=True)
+        os.makedirs(os.path.join(self.run_dir, "clips"), exist_ok=True)
+        os.makedirs(os.path.join(self.run_dir, "reports"), exist_ok=True)
+        self.clip = ClipGenerator(os.path.join(self.run_dir, "clips"))
+        self.rep = ReportGenerator(os.path.join(self.run_dir, "reports"))
+
+    def _cos(self, a, b):
+        den = float(np.linalg.norm(a) * np.linalg.norm(b))
+        if den == 0:
+            return 0.0
+        return float(np.dot(a, b) / den)
+
+    def _obj_bonus(self, q, objs):
+        q = q.lower()
+        names = set(objs.keys())
+        hit = 0.0
+        for name, keys in self.obj_keys.items():
+            if any(k in q for k in keys) and name in names:
+                hit += 0.12
+        return min(hit, 0.36)
+
+    def _act_bonus(self, q, meta):
+        q = q.lower()
+        hit = 0.0
+        for k in self.act_keys["still"]:
+            if k in q and meta.get("still_people", 0) > 0:
+                hit += 0.12
+                break
+        for k in self.act_keys["move"]:
+            if k in q and meta.get("moving_tracks", 0) > 0:
+                hit += 0.12
+                break
+        for k in self.act_keys["crowd"]:
+            if k in q and meta.get("person", 0) >= 3:
+                hit += 0.12
+                break
+        return min(hit, 0.24)
+
+    def _track_meta(self, tracks, hist, ts):
+        objs = {}
+        tids = []
+        move = 0
+        still = 0
+        for t in tracks:
+            name = t["name"]
+            objs[name] = objs.get(name, 0) + 1
+            tids.append(t["id"])
+            x1, y1, x2, y2 = t["box"]
+            cx = (x1 + x2) / 2
+            cy = (y1 + y2) / 2
+            old = hist.get(t["id"])
+            if old:
+                dt = max(ts - old["ts"], 1e-6)
+                d = ((cx - old["cx"]) ** 2 + (cy - old["cy"]) ** 2) ** 0.5 / dt
+                if d > 45:
+                    move += 1
+                else:
+                    still += 1
+            hist[t["id"]] = {"cx": cx, "cy": cy, "ts": ts}
+        return {
+            "objects": objs,
+            "tracks": sorted(set(tids)),
+            "moving_tracks": move,
+            "still_people": still if objs.get("person", 0) else 0,
+            "person": objs.get("person", 0),
+        }
+
+    def _save_frame(self, frame, i):
+        path = os.path.join(self.run_dir, "frames", f"f_{i:06d}.jpg")
+        cv2.imwrite(path, frame)
+        return path
+
+    def _merge_hits(self, hits, gap=2.0):
+        if not hits:
+            return []
+        hits = sorted(hits, key=lambda x: x["start"])
+        out = [dict(hits[0])]
+        for cur in hits[1:]:
+            prv = out[-1]
+            if cur["start"] <= prv["end"] + gap:
+                prv["end"] = max(prv["end"], cur["end"])
+                prv["score"] = max(prv["score"], cur["score"])
+                prv["objects"] = sorted(set(prv["objects"]) | set(cur["objects"]))
+                prv["tracks"] = sorted(set(prv["tracks"]) | set(cur["tracks"]))
+                prv["summary"] = cur["summary"] if cur["score"] >= prv["score"] else prv["summary"]
+                continue
+            out.append(dict(cur))
+        return out
+
+    def _seg_summary(self, meta):
+        objs = meta["objects"]
+        if not objs:
+            return "no tracked objects"
+        parts = [f"{v} {k}" for k, v in sorted(objs.items(), key=lambda x: (-x[1], x[0]))]
+        tag = []
+        if meta.get("still_people", 0) > 0:
+            tag.append("still person")
+        if meta.get("moving_tracks", 0) > 0:
+            tag.append("moving track")
+        if meta.get("person", 0) >= 3:
+            tag.append("crowd")
+        return ", ".join(parts + tag[:2])
+
+    def index_video(self, video, cls=None, sample_sec=1.0, win_sec=6.0, progress=None):
+        self._new_run(video)
+        self.trk.reset()
+        cap = cv2.VideoCapture(video)
+        if not cap.isOpened():
+            raise ValueError(f"cannot open video: {video}")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        dur = total / fps if fps else 0.0
+        step = max(1, int(round(sample_sec * fps)))
+        half = max(1, int(round(win_sec / sample_sec / 2)))
+        frames = []
+        hist = {}
+        i = 0
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if i % step != 0:
+                i += 1
+                continue
+            ts = i / fps
+            tracks = self.trk.track(frame, cls=cls)
+            meta = self._track_meta(tracks, hist, ts)
+            emb = self.enc.embed_frame(frame)
+            frame_path = self._save_frame(frame, i)
+            frames.append({
+                "frame": i,
+                "ts": ts,
+                "emb": emb,
+                "frame_path": frame_path,
+                "meta": meta,
+            })
+            if progress and total:
+                progress(min(ts / max(dur, 1e-6), 0.98), desc=f"indexing {ts:0.1f}s / {dur:0.1f}s")
+            i += 1
+        cap.release()
+        segs = []
+        for j, item in enumerate(frames):
+            lo = max(0, j - half)
+            hi = min(len(frames), j + half + 1)
+            chunk = frames[lo:hi]
+            emb = np.mean([x["emb"] for x in chunk], axis=0).astype(np.float32)
+            emb = emb / max(np.linalg.norm(emb), 1e-6)
+            objs = {}
+            tids = set()
+            moving = 0
+            still = 0
+            for x in chunk:
+                moving += x["meta"]["moving_tracks"]
+                still += x["meta"]["still_people"]
+                tids |= set(x["meta"]["tracks"])
+                for k, v in x["meta"]["objects"].items():
+                    objs[k] = max(objs.get(k, 0), v)
+            meta = {
+                "objects": objs,
+                "tracks": sorted(tids),
+                "moving_tracks": moving,
+                "still_people": still,
+                "person": objs.get("person", 0),
+            }
+            segs.append({
+                "start": chunk[0]["ts"],
+                "end": chunk[-1]["ts"],
+                "mid": item["ts"],
+                "emb": emb,
+                "frame_path": item["frame_path"],
+                "meta": meta,
+                "summary": self._seg_summary(meta),
+            })
+        meta = {
+            "video": video,
+            "fps": fps,
+            "frames": total,
+            "duration": dur,
+            "sample_sec": sample_sec,
+            "win_sec": win_sec,
+            "segments": len(segs),
+        }
+        self.idx = {"video": video, "meta": meta, "frames": frames, "segments": segs}
+        slim = {
+            "meta": meta,
+            "segments": [{
+                "start": x["start"],
+                "end": x["end"],
+                "mid": x["mid"],
+                "frame_path": x["frame_path"],
+                "meta": x["meta"],
+                "summary": x["summary"],
+            } for x in segs]
+        }
+        path = os.path.join(self.run_dir, "reports", "index.json")
+        self.rep.write_json(path, slim)
+        return {"run_dir": self.run_dir, "meta": meta, "index_json": path}
+
+    def search(self, q, top_k=5):
+        if not self.idx:
+            raise ValueError("index not ready")
+        qv = self.enc.embed_text(q)
+        rows = []
+        for seg in self.idx["segments"]:
+            base = self._cos(qv, seg["emb"])
+            bonus = self._obj_bonus(q, seg["meta"]["objects"]) + self._act_bonus(q, seg["meta"])
+            score = base + bonus
+            rows.append({
+                "query": q,
+                "score": score,
+                "start": seg["start"],
+                "end": seg["end"],
+                "summary": seg["summary"],
+                "objects": sorted(seg["meta"]["objects"].keys()),
+                "tracks": seg["meta"]["tracks"],
+                "frame_path": seg["frame_path"],
+            })
+        rows = sorted(rows, key=lambda x: x["score"], reverse=True)
+        rows = self._merge_hits(rows[: max(top_k * 3, 12)])
+        return rows[:top_k]
+
+    def export_hits(self, q, hits, clip_pad=2.0):
+        if not self.idx:
+            raise ValueError("index not ready")
+        hits = self.clip.extract_many(self.idx["video"], hits, pad=clip_pad)
+        payload = {
+            "query": q,
+            "video": self.idx["video"],
+            "meta": self.idx["meta"],
+            "hits": hits,
+        }
+        base = datetime.now().strftime("%Y%m%d_%H%M%S")
+        js = self.rep.write_json(os.path.join(self.run_dir, "reports", f"hits_{base}.json"), payload)
+        csv = self.rep.write_csv(os.path.join(self.run_dir, "reports", f"hits_{base}.csv"), hits)
+        html = self.rep.write_html(os.path.join(self.run_dir, "reports", f"hits_{base}.html"), payload)
+        zipf = self.rep.write_zip(os.path.join(self.run_dir, "reports", f"clips_{base}.zip"), [x["clip"] for x in hits])
+        return {"hits": hits, "json": js, "csv": csv, "html": html, "zip": zipf}

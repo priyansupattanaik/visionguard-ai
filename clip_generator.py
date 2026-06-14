@@ -1,108 +1,48 @@
-"""
-Clip extraction and generation module.
-Extracts relevant video segments based on timestamps or incident triggers.
-"""
-import cv2
 import os
-from typing import List, Tuple, Dict
-from datetime import datetime, timedelta
-import numpy as np
+import re
+import cv2
 
 
 class ClipGenerator:
-    def __init__(self, output_dir: str = "output/clips"):
-        self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
-        
-    def extract_clip(self, video_path: str, start_time: float, end_time: float,
-                     output_name: str = None, padding: float = 2.0) -> str:
-        """
-        Extract a video clip from start_time to end_time with padding.
-        
-        Args:
-            video_path: Source video file
-            start_time: Start time in seconds
-            end_time: End time in seconds
-            padding: Extra seconds before/after
-            output_name: Custom filename
-            
-        Returns:
-            Path to extracted clip
-        """
-        cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        start_sec = max(0, start_time - padding)
-        end_sec = min(
-            cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps,
-            end_time + padding
-        )
-        
-        start_frame = int(start_sec * fps)
-        end_frame = int(end_sec * fps)
-        
-        if output_name is None:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_name = f"clip_{timestamp}_{start_sec:.1f}_{end_sec:.1f}.mp4"
-            
-        output_path = os.path.join(self.output_dir, output_name)
-        
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-        
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        
-        current_frame = start_frame
-        while current_frame < end_frame:
-            ret, frame = cap.read()
-            if not ret:
+    def __init__(self, out_dir):
+        self.out_dir = out_dir
+        os.makedirs(out_dir, exist_ok=True)
+
+    def _safe(self, txt):
+        txt = re.sub(r"[^a-zA-Z0-9_-]+", "_", txt.strip().lower())
+        return txt[:60] or "clip"
+
+    def extract_clip(self, video, st, ed, name, pad=2.0):
+        cap = cv2.VideoCapture(video)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        st = max(0.0, st - pad)
+        ed = min(total / fps if fps else ed, ed + pad)
+        s0 = int(st * fps)
+        s1 = int(ed * fps)
+        path = os.path.join(self.out_dir, f"{self._safe(name)}_{s0}_{s1}.mp4")
+        out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, s0)
+        i = s0
+        while i <= s1:
+            ok, frame = cap.read()
+            if not ok:
                 break
             out.write(frame)
-            current_frame += 1
-            
+            i += 1
         cap.release()
         out.release()
-        
-        return output_path
-    
-    def extract_incident_clips(self, video_path: str, incidents: List[Dict],
-                                padding: float = 3.0) -> List[str]:
-        """
-        Extract clips for multiple incidents.
-        
-        Args:
-            incidents: List of {start_time, end_time, description, severity}
-            
-        Returns:
-            List of extracted clip paths
-        """
-        clip_paths = []
-        for i, incident in enumerate(incidents):
-            output_name = f"incident_{i+1}_{incident.get('severity', 'medium')}.mp4"
-            path = self.extract_clip(
-                video_path,
-                incident["start_time"],
-                incident["end_time"],
-                output_name=output_name,
-                padding=padding
-            )
-            clip_paths.append({
-                "path": path,
-                "incident": incident,
-                "duration": incident["end_time"] - incident["start_time"] + (padding * 2)
-            })
-        return clip_paths
-    
-    def create_highlight_reel(self, video_path: str, incidents: List[Dict],
-                              output_name: str = "highlight_reel.mp4") -> str:
-        """
-        Create a compilation of all incidents with title cards.
-        """
-        # Implementation for concatenating clips with transitions
-        # (Simplified version - uses ffmpeg if available, else sequential write)
-        clips = self.extract_incident_clips(video_path, incidents, padding=2.0)
-        
-        # For now, return the list; full concatenation requires ffmpeg-python
-        return clips
+        return path
+
+    def extract_many(self, video, hits, pad=2.0):
+        out = []
+        for i, hit in enumerate(hits, 1):
+            q = hit.get("query") or f"hit_{i}"
+            name = f"{i:02d}_{q}"
+            path = self.extract_clip(video, hit["start"], hit["end"], name, pad=pad)
+            x = dict(hit)
+            x["clip"] = path
+            out.append(x)
+        return out

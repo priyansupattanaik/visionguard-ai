@@ -1,73 +1,59 @@
-"""
-Object Detection Module using YOLO11m.
-Handles frame-by-frame detection with confidence filtering.
-"""
-import cv2
+import os
+
 import torch
+
+os.environ.setdefault("YOLO_CONFIG_DIR", os.path.join(os.getcwd(), ".yolo"))
+os.makedirs(os.environ["YOLO_CONFIG_DIR"], exist_ok=True)
+
 from ultralytics import YOLO
-from typing import List, Dict, Tuple, Optional
-import numpy as np
 
 
 class ObjectDetector:
-    def __init__(self, model_path: str = "yolo11m.pt", conf_threshold: float = 0.45, device: str = None):
-        """
-        Initialize YOLO11m detector.
-        
-        Args:
-            model_path: Path to YOLO11m weights (auto-downloads if not present)
-            conf_threshold: Minimum confidence for detection
-            device: 'cuda', 'cpu', or None (auto)
-        """
-        self.conf_threshold = conf_threshold
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        
-        print(f"[Detector] Loading YOLO11m on {self.device}...")
-        self.model = YOLO(model_path)
-        self.model.to(self.device)
-        print(f"[Detector] Model loaded. Classes: {self.model.names}")
-        
-    def detect(self, frame: np.ndarray, classes: Optional[List[int]] = None) -> List[Dict]:
-        """
-        Run detection on a single frame.
-        
-        Returns:
-            List of detections: [{bbox: [x1,y1,x2,y2], conf: float, class_id: int, class_name: str}]
-        """
-        results = self.model(frame, verbose=False, conf=self.conf_threshold, classes=classes)
-        detections = []
-        
-        for r in results:
-            if r.boxes is None:
+    def __init__(self, model="yolo11n.pt", conf=0.35, imgsz=960, tracker="bytetrack.yaml", device=None):
+        self.model_name = model
+        self.conf = conf
+        self.imgsz = imgsz
+        self.tracker = tracker
+        self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.m = None
+        self.names = {}
+
+    def load(self):
+        if self.m is not None:
+            return
+        self.m = YOLO(self.model_name)
+        self.m.to(self.dev)
+        self.names = self.m.names
+
+    def reset(self):
+        self.m = None
+        self.names = {}
+
+    def track(self, frame, cls=None):
+        self.load()
+        res = self.m.track(
+            frame,
+            persist=True,
+            verbose=False,
+            conf=self.conf,
+            imgsz=self.imgsz,
+            tracker=self.tracker,
+            classes=cls,
+        )
+        out = []
+        for r in res:
+            if r.boxes is None or r.boxes.id is None:
                 continue
-            for box in r.boxes:
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                conf = float(box.conf[0].cpu().numpy())
-                cls_id = int(box.cls[0].cpu().numpy())
-                
-                detections.append({
-                    "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                    "conf": round(conf, 3),
-                    "class_id": cls_id,
-                    "class_name": self.model.names[cls_id]
+            ids = r.boxes.id.int().cpu().tolist()
+            boxes = r.boxes.xyxy.cpu().tolist()
+            confs = r.boxes.conf.cpu().tolist()
+            clss = r.boxes.cls.int().cpu().tolist()
+            for tid, box, cf, ci in zip(ids, boxes, confs, clss):
+                out.append({
+                    "id": int(tid),
+                    "box": [round(x, 2) for x in box],
+                    "conf": round(float(cf), 4),
+                    "cls": int(ci),
+                    "name": self.names.get(int(ci), str(ci)),
                 })
-        return detections
-    
-    def detect_batch(self, frames: List[np.ndarray], classes: Optional[List[int]] = None) -> List[List[Dict]]:
-        """Batch detection for faster processing."""
-        results = self.model(frames, verbose=False, conf=self.conf_threshold, classes=classes)
-        all_detections = []
-        
-        for r in results:
-            frame_dets = []
-            if r.boxes is not None:
-                for box in r.boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    frame_dets.append({
-                        "bbox": [float(x1), float(y1), float(x2), float(y2)],
-                        "conf": round(float(box.conf[0].cpu().numpy()), 3),
-                        "class_id": int(box.cls[0].cpu().numpy()),
-                        "class_name": self.model.names[int(box.cls[0].cpu().numpy())]
-                    })
-            all_detections.append(frame_dets)
-        return all_detections
+        return out

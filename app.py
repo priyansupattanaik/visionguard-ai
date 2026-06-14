@@ -1,206 +1,101 @@
-"""
-Gradio Web UI for VisionGuard AI.
-Provides real-time upload, processing, and interactive results.
-"""
-import gradio as gr
 import os
-import cv2
-import tempfile
+
+import gradio as gr
+
 from pipeline import VisionGuardPipeline
-from typing import Tuple, List
 
 
-def create_ui():
-    """Create and launch the Gradio interface."""
-    
-    # Global pipeline instance (lazy loaded)
-    pipeline = None
-    
-    def get_pipeline():
-        nonlocal pipeline
-        if pipeline is None:
-            pipeline = VisionGuardPipeline()
-        return pipeline
-    
-    def process_video(video_file, custom_prompt, target_class, progress=gr.Progress()):
+pipe = VisionGuardPipeline()
+
+
+def _cls(mode):
+    mp = {
+        "all": None,
+        "person": [0],
+        "vehicle": [1, 2, 3, 5, 7],
+    }
+    return mp.get(mode, None)
+
+
+def _fmt_meta(meta):
+    return (
+        f"video: `{os.path.basename(meta['video'])}`\n\n"
+        f"- duration: `{meta['duration']:.2f}s`\n"
+        f"- fps: `{meta['fps']:.2f}`\n"
+        f"- sampled every: `{meta['sample_sec']:.2f}s`\n"
+        f"- search windows: `{meta['segments']}`"
+    )
+
+
+def build_idx(video, mode, sample_sec, win_sec, progress=gr.Progress()):
+    if not video:
+        return "upload a video first", None, None
+    res = pipe.index_video(video, cls=_cls(mode), sample_sec=sample_sec, win_sec=win_sec, progress=progress)
+    return _fmt_meta(res["meta"]), res["index_json"], gr.update(interactive=True)
+
+
+def run_search(q, top_k, clip_pad):
+    if not pipe.idx:
+        return "index a video first", [], None, None, None, None
+    if not q or not q.strip():
+        return "enter a natural-language query", [], None, None, None, None
+    hits = pipe.search(q.strip(), top_k=int(top_k))
+    exp = pipe.export_hits(q.strip(), hits, clip_pad=clip_pad)
+    rows = []
+    md = [f"## matches for `{q}`", ""]
+    if not exp["hits"]:
+        md.append("no strong matches found")
+    for i, x in enumerate(exp["hits"], 1):
+        rows.append([i, round(x["score"], 4), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])])
+        md.append(f"{i}. `{x['start']:.2f}s - {x['end']:.2f}s` score `{x['score']:.4f}`  ")
+        md.append(f"   {x['summary']}")
+    first = exp["hits"][0]["clip"] if exp["hits"] else None
+    clips = [x["clip"] for x in exp["hits"]]
+    files = [exp["html"], exp["csv"], exp["json"], exp["zip"]]
+    return "\n".join(md), rows, first, clips, files, exp["json"]
+
+
+with gr.Blocks(title="VisionGuard AI") as demo:
+    gr.Markdown(
         """
-        Main processing handler.
-        
-        Args:
-            video_file: Uploaded video path
-            custom_prompt: User's custom analysis prompt
-            target_class: Class filter (Person, Vehicle, All)
-        """
-        if video_file is None:
-            return "⚠️ Please upload a video file.", None, None, None, None
-        
-        progress(0, desc="Initializing pipeline...")
-        
-        # Map class selection to COCO IDs
-        class_map = {
-            "Person Only": [0],
-            "Vehicle Only": [2, 3, 5, 7],  # car, motorcycle, bus, truck
-            "All Classes": None
-        }
-        
-        try:
-            pipe = get_pipeline()
-            
-            # Progress callback
-            def update_progress(pct, msg):
-                progress(min(pct / 100, 0.99), desc=msg)
-            
-            results = pipe.process_video(
-                video_file,
-                custom_prompt=custom_prompt if custom_prompt else None,
-                progress_callback=update_progress,
-                target_classes=class_map.get(target_class, None)
-            )
-            
-            progress(1.0, desc="Complete!")
-            
-            # Format outputs
-            incident_text = f"## 🛡️ Processing Complete\n\n"
-            incident_text += f"**Total Incidents Detected:** {results['incident_count']}\n\n"
-            
-            if results['incidents']:
-                for i, inc in enumerate(results['incidents'], 1):
-                    incident_text += (
-                        f"### Incident #{i} ({inc['severity'].upper()})\n"
-                        f"**Time:** {inc['start_time']:.1f}s - {inc['end_time']:.1f}s "
-                        f"(Duration: {inc['duration']:.1f}s)\n\n"
-                        f"**Description:** {inc['description'][:300]}...\n\n"
-                        f"**Objects:** {', '.join(inc['objects'])}\n"
-                        f"**Tracks:** {', '.join(map(str, inc['track_ids']))}\n\n"
-                        f"---\n\n"
-                    )
-            else:
-                incident_text += "No incidents detected in this footage.\n"
-            
-            # Collect output files
-            clips = results.get('clips', [])
-            report_path = results.get('html_report', '')
-            
-            return (
-                incident_text,
-                report_path if os.path.exists(report_path) else None,
-                clips[0] if clips else None,
-                "\n".join(clips) if clips else "No clips extracted",
-                results.get('json_data', '')
-            )
-            
-        except Exception as e:
-            return f"❌ Error: {str(e)}", None, None, None, None
-    
-    def search_incidents(query, history):
-        """Semantic search across processed incidents."""
-        if not query:
-            return "Enter a search query"
-        
-        pipe = get_pipeline()
-        results = pipe.semantic_search(query)
-        
-        if not results:
-            return "No matching incidents found."
-            
-        output = f"Found {len(results)} matching incidents:\n\n"
-        for inc in results:
-            output += (
-                f"- **{inc['start_time']:.1f}s**: {inc['description'][:150]}... "
-                f"[{inc['severity']}]\n"
-            )
-        return output
-    
-    # UI Layout
-    with gr.Blocks(title="VisionGuard AI - CCTV Analysis", theme=gr.themes.Soft()) as demo:
-        gr.Markdown(
-            """
-            # 🛡️ VisionGuard AI
-            ### Advanced CCTV Incident Detection & Analysis
-            *Powered by YOLO11m + ByteTrack + Qwen2.5-VL-3B*
-            """
-        )
-        
-        with gr.Row():
-            with gr.Column(scale=1):
-                # Input Panel
-                gr.Markdown("## 📁 Input")
-                video_input = gr.Video(
-                    label="Upload CCTV Footage",
-                    format="mp4"
-                )
-                
-                prompt_input = gr.Textbox(
-                    label="Custom Analysis Prompt (Optional)",
-                    placeholder="E.g., 'Look for unauthorized access near the restricted zone'",
-                    lines=3
-                )
-                
-                class_filter = gr.Radio(
-                    choices=["All Classes", "Person Only", "Vehicle Only"],
-                    value="All Classes",
-                    label="Detection Focus"
-                )
-                
-                process_btn = gr.Button("🚀 Analyze Footage", variant="primary", size="lg")
-                
-                # Search Panel
-                gr.Markdown("## 🔍 Semantic Search")
-                search_input = gr.Textbox(
-                    label="Search Incidents",
-                    placeholder="E.g., 'person loitering near entrance'"
-                )
-                search_btn = gr.Button("Search")
-                search_output = gr.Textbox(label="Results", lines=10)
-                
-            with gr.Column(scale=2):
-                # Results Panel
-                gr.Markdown("## 📊 Analysis Results")
-                
-                with gr.Tab("Incident Report"):
-                    incident_output = gr.Markdown()
-                
-                with gr.Tab("HTML Report"):
-                    report_file = gr.File(label="Download Report")
-                
-                with gr.Tab("Video Clips"):
-                    clip_player = gr.Video(label="Incident Clip Preview")
-                    clip_list = gr.Textbox(label="All Extracted Clips", lines=5)
-                
-                with gr.Tab("Raw Data"):
-                    json_file = gr.File(label="Download JSON")
-        
-        # Event Handlers
-        process_btn.click(
-            fn=process_video,
-            inputs=[video_input, prompt_input, class_filter],
-            outputs=[incident_output, report_file, clip_player, clip_list, json_file]
-        )
-        
-        search_btn.click(
-            fn=search_incidents,
-            inputs=[search_input, incident_output],
-            outputs=search_output
-        )
-        
-        gr.Markdown(
-            """
-            ---
-            **Note:** First run will download YOLO11m (~40MB) and Qwen2.5-VL-3B (~6GB) models.
-            Processing time depends on video length and GPU availability.
-            """
-        )
-    
-    return demo
+# VisionGuard AI
+
+Index CCTV footage, search it with natural language, and export matched clips with timestamp records.
+"""
+    )
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            video = gr.Video(label="cctv video")
+            mode = gr.Radio(["all", "person", "vehicle"], value="all", label="focus")
+            sample_sec = gr.Slider(0.5, 5.0, value=1.0, step=0.5, label="sample every (sec)")
+            win_sec = gr.Slider(2.0, 15.0, value=6.0, step=1.0, label="match window (sec)")
+            idx_btn = gr.Button("index video", variant="primary")
+            idx_md = gr.Markdown()
+            idx_file = gr.File(label="index json")
+
+            gr.Markdown("### query")
+            q = gr.Textbox(placeholder="person sitting near gate, white car entering, group at entrance")
+            top_k = gr.Slider(1, 10, value=5, step=1, label="top clips")
+            clip_pad = gr.Slider(0.0, 6.0, value=2.0, step=0.5, label="clip padding (sec)")
+            src = ["assets/asset1.mp4", "assets/asset2.mp4", "assets/asset3.mp4"]
+            good = [x for x in src if os.path.exists(x)]
+            if good:
+                gr.Examples(good, inputs=video, label="sample videos")
+            search_btn = gr.Button("search and export", interactive=False)
+
+        with gr.Column(scale=2):
+            out_md = gr.Markdown()
+            out_tbl = gr.Dataframe(headers=["rank", "score", "start", "end", "summary", "objects"], interactive=False)
+            out_vid = gr.Video(label="top clip")
+            out_clips = gr.Files(label="all clips")
+            out_files = gr.Files(label="reports")
+            raw_json = gr.File(label="raw search json")
+
+    idx_btn.click(build_idx, [video, mode, sample_sec, win_sec], [idx_md, idx_file, search_btn])
+    search_btn.click(run_search, [q, top_k, clip_pad], [out_md, out_tbl, out_vid, out_clips, out_files, raw_json])
 
 
 if __name__ == "__main__":
-    demo = create_ui()
-    # Launch with public URL for Colab, local for development
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=True,  # Creates public URL for Colab
-        debug=True,
-        show_error=True
-    )
+    share = bool(os.getenv("COLAB_RELEASE_TAG"))
+    demo.launch(server_name="0.0.0.0", share=share, show_error=True)
