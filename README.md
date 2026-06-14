@@ -7,14 +7,14 @@ pinned: false
 
 # VisionGuard AI
 
-Natural-language CCTV search with live indexing preview, matched clip segmentation, per-match export, and timestamp reports.
+Natural-language CCTV search with a scan-first workflow, live indexing preview, matched clip segmentation, per-match export, and timestamp reports.
 
 ## Stack
 
-- `ultralytics` YOLO + ByteTrack for live indexing preview
-- `transformers` SigLIP2 for retrieval
-- `transformers` Grounding DINO for query grounding
-- `transformers` SAM2 for matched clip segmentation
+- `ultralytics` `yolo11s.pt` + ByteTrack for live indexing preview and overlap-heavy tracking
+- `transformers` `google/siglip2-so400m-patch14-384` for text-video retrieval
+- `transformers` `IDEA-Research/grounding-dino-base` for query grounding
+- `transformers` `facebook/sam2.1-hiera-small` for matched clip segmentation
 - `gradio` for the UI
 - OpenCV for video read/write
 
@@ -35,16 +35,20 @@ python app.py
 ## Google Colab
 
 ```python
-!git clone https://github.com/priyansupattanaik/visionguard-ai.git
-%cd visionguard-ai
 from google.colab import drive
 drive.mount('/content/drive')
+import os
+if not os.path.exists("/content/visionguard-ai"):
+    !git clone https://github.com/priyansupattanaik/visionguard-ai.git /content/visionguard-ai
+%cd /content/visionguard-ai
+!git pull
 !pip install -r requirements.txt
 !python app.py
 ```
 
 Colab will expose a Gradio share link automatically in the notebook output.
-Use a GPU runtime in Colab for live grounding and segmentation.
+Use a GPU runtime in Colab for the current default stack.
+The first run downloads the models once. If Drive is mounted, the project cache helper keeps Hugging Face and Torch caches in Drive so later Colab sessions reuse them.
 
 You can also open the ready notebook:
 
@@ -91,16 +95,19 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 - GPU Spaces are strongly recommended for Grounding DINO + SAM2.
 - If you want tighter version control, add `sdk_version` in the YAML block at the top of this file.
 
-## Search flow
+## App Flow
 
 1. Upload or pick a video.
-2. Enter a natural-language query.
-3. Watch live indexing preview.
-4. Review the matched segmented clips.
-5. Export only the clips and reports you want.
+2. Click `step 1: scan video`.
+3. Watch live indexing preview until scan completes.
+4. Enter a natural-language query.
+5. Click `step 2: find matches`.
+6. Use `view one match` to switch clips.
+7. Export only the clips and reports you want.
 
 ## Notes
 
 - Mount Drive in Colab before running if you want model downloads cached between sessions.
 - Best experience comes from GPU-backed Colab or GPU-enabled Spaces.
 - Event-like queries such as `car accident`, `collision`, `fight`, or `incident` get extra heuristic boosts from tracked motion and overlap.
+- The UI now also writes a short answer block below the query with timestamps and what was detected in each returned match.

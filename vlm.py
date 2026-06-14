@@ -7,7 +7,7 @@ from transformers import AutoModel, AutoProcessor
 
 
 class SearchEncoder:
-    def __init__(self, model="google/siglip2-base-patch16-224", device=None):
+    def __init__(self, model="google/siglip2-so400m-patch14-384", device=None):
         self.model_name = model
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.p = None

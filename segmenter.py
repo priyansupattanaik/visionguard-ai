@@ -8,7 +8,7 @@ from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor, Sam
 
 
 class GroundedSegmenter:
-    def __init__(self, gdino="IDEA-Research/grounding-dino-tiny", sam="facebook/sam2.1-hiera-tiny", device=None):
+    def __init__(self, gdino="IDEA-Research/grounding-dino-base", sam="facebook/sam2.1-hiera-small", device=None):
         self.gdino_name = gdino
         self.sam_name = sam
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")

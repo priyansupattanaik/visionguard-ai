@@ -26,6 +26,17 @@ def _meta(meta):
     )
 
 
+def _ans(q, rows):
+    out = [f"## answer for `{q}`", ""]
+    if not rows:
+        out.append("no strong matches found")
+        return "\n".join(out)
+    for i, x in enumerate(rows, 1):
+        out.append(f"{i}. `{x['start']:.2f}s - {x['end']:.2f}s`")
+        out.append(f"   {x['summary']}")
+    return "\n".join(out)
+
+
 def scan_only(video):
     if not video:
         yield "upload a video first", None, "", gr.update(interactive=False), "", []
@@ -50,6 +61,7 @@ def find_query(q):
     hits = pipe.search(q.strip(), top_k=4)
     seg = pipe.segment_hits(hits, q.strip())
     rows = [[i, round(x["score"], 4), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])] for i, x in enumerate(seg, 1)]
+    ans = _ans(q.strip(), seg)
     gal = []
     for x in seg:
         for fp in x["frames"][:3]:
@@ -58,7 +70,7 @@ def find_query(q):
     first = seg[0]["clip"] if seg else None
     all_clips = [x["clip"] for x in seg] + [x["raw_clip"] for x in seg]
     note = f"### {seg[0]['label']}\n\n{seg[0]['summary']}" if seg else ""
-    return "matches ready", rows, first, all_clips, gr.update(choices=choices, value=choices[:1]), gr.update(choices=choices, value=choices[0] if choices else None), gal, note, q.strip(), seg
+    return "matches ready", ans, rows, first, all_clips, gr.update(choices=choices, value=choices[:1]), gr.update(choices=choices, value=choices[0] if choices else None), gal, note, q.strip(), seg
 
 
 def show_match(label, hits):
@@ -104,6 +116,7 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=gr.themes.Soft(primary_hue
             find_btn = gr.Button("step 2: find matches", interactive=False)
 
         with gr.Column(scale=2):
+            answer = gr.Markdown()
             table = gr.Dataframe(headers=["rank", "score", "start", "end", "summary", "objects"], interactive=False)
             pick_one = gr.Dropdown(label="view one match", choices=[], value=None)
             clip = gr.Video(label="selected match clip")
@@ -118,7 +131,7 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=gr.themes.Soft(primary_hue
 
     scan_btn.click(scan_only, [video], [status, live, info, query, q_state, hits_state])
     scan_btn.click(lambda: gr.update(interactive=True), None, find_btn)
-    find_btn.click(find_query, [query], [status, table, clip, clips, pick, pick_one, gallery, match_md, q_state, hits_state])
+    find_btn.click(find_query, [query], [status, answer, table, clip, clips, pick, pick_one, gallery, match_md, q_state, hits_state])
     pick_one.change(show_match, [pick_one, hits_state], [clip, gallery, match_md])
     export_btn.click(export_selected, [pick, q_state, hits_state], [zipf, html, csv])
 

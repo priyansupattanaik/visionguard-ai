@@ -16,7 +16,7 @@ setup_cache()
 
 
 class VisionGuardPipeline:
-    def __init__(self, out_dir="output", yolo="yolo11n.pt", clip_model="google/siglip2-base-patch16-224", gdino="IDEA-Research/grounding-dino-tiny", sam="facebook/sam2.1-hiera-tiny"):
+    def __init__(self, out_dir="output", yolo="yolo11s.pt", clip_model="google/siglip2-so400m-patch14-384", gdino="IDEA-Research/grounding-dino-base", sam="facebook/sam2.1-hiera-small"):
         self.out_dir = out_dir
         self.trk = ObjectTracker(model=yolo)
         self.enc = SearchEncoder(model=clip_model)

@@ -9,7 +9,7 @@ from ultralytics import YOLO
 
 
 class ObjectTracker:
-    def __init__(self, model="yolo11n.pt", conf=0.35, imgsz=960, tracker="bytetrack.yaml", device=None):
+    def __init__(self, model="yolo11s.pt", conf=0.32, imgsz=960, tracker="bytetrack.yaml", device=None):
         self.model_name = model
         self.conf = conf
         self.imgsz = imgsz
