@@ -41,9 +41,34 @@ python app.py
 
 Colab will expose a Gradio share link automatically in the notebook output.
 
+You can also open the ready notebook:
+
+- `VisionGuard_Colab.ipynb`
+
+## Open In Colab
+
+After pushing the notebook to GitHub, open it with:
+
+`https://colab.research.google.com/github/priyansupattanaik/visionguard-ai/blob/main/VisionGuard_Colab.ipynb`
+
 ## Hugging Face Spaces
 
 Push this repo to a Gradio Space. The YAML block at the top of this `README.md` is the Spaces config. Spaces installs `requirements.txt` and starts `app.py`.
+
+### Space steps
+
+1. Create a new Space on Hugging Face.
+2. Choose `Gradio` as the SDK.
+3. Connect the GitHub repo or upload the repo files.
+4. Keep `app.py` as the entry file.
+5. Let Spaces install `requirements.txt`.
+6. Open the Space once the build finishes.
+
+### Notes
+
+- CPU Spaces will work but will be slower for long videos.
+- For better search speed and tracking, use a GPU Space if available.
+- If you want tighter version control, add `sdk_version` in the YAML block at the top of this file.
 
 ## Search flow
 

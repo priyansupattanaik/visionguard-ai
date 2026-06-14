@@ -1,4 +1,5 @@
 __pycache__/
 .yolo/
 output/
+yolo11n.pt
 .venv

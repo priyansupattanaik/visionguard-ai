@@ -6,6 +6,13 @@ from pipeline import VisionGuardPipeline
 
 
 pipe = VisionGuardPipeline()
+css = """
+.gradio-container{max-width:1280px!important}
+.hero{padding:20px 24px;border-radius:20px;background:linear-gradient(135deg,#12344d 0%,#1e6f86 55%,#7cc4b8 100%);color:#fff;margin-bottom:18px}
+.hero h1{margin:0 0 8px 0;font-size:34px}
+.hero p{margin:0;font-size:15px;opacity:.95}
+.cardnote{padding:10px 14px;border:1px solid #d9e5ec;border-radius:14px;background:#f7fbfd}
+"""
 
 
 def _cls(mode):
@@ -36,31 +43,36 @@ def build_idx(video, mode, sample_sec, win_sec, progress=gr.Progress()):
 
 def run_search(q, top_k, clip_pad):
     if not pipe.idx:
-        return "index a video first", [], None, None, None, None
+        return "index a video first", [], None, None, None, None, None
     if not q or not q.strip():
-        return "enter a natural-language query", [], None, None, None, None
+        return "enter a natural-language query", [], None, None, None, None, None
     hits = pipe.search(q.strip(), top_k=int(top_k))
     exp = pipe.export_hits(q.strip(), hits, clip_pad=clip_pad)
     rows = []
     md = [f"## matches for `{q}`", ""]
+    gal = []
     if not exp["hits"]:
         md.append("no strong matches found")
     for i, x in enumerate(exp["hits"], 1):
         rows.append([i, round(x["score"], 4), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])])
         md.append(f"{i}. `{x['start']:.2f}s - {x['end']:.2f}s` score `{x['score']:.4f}`  ")
         md.append(f"   {x['summary']}")
+        gal.append((x["frame_path"], f"{i}. {x['start']:.2f}s - {x['end']:.2f}s"))
     first = exp["hits"][0]["clip"] if exp["hits"] else None
     clips = [x["clip"] for x in exp["hits"]]
     files = [exp["html"], exp["csv"], exp["json"], exp["zip"]]
-    return "\n".join(md), rows, first, clips, files, exp["json"]
+    best = exp["hits"][0] if exp["hits"] else None
+    jump = None if best is None else f"top match: `{best['start']:.2f}s - {best['end']:.2f}s`"
+    return "\n".join(md), rows, first, clips, files, exp["json"], gal if gal else jump
 
 
-with gr.Blocks(title="VisionGuard AI") as demo:
-    gr.Markdown(
+with gr.Blocks(title="VisionGuard AI", theme=gr.themes.Soft(primary_hue="cyan", secondary_hue="slate"), css=css) as demo:
+    gr.HTML(
         """
-# VisionGuard AI
-
-Index CCTV footage, search it with natural language, and export matched clips with timestamp records.
+<div class="hero">
+  <h1>VisionGuard AI</h1>
+  <p>Index CCTV footage once, search it with natural language, jump to the matched part, and export clips with timestamp records.</p>
+</div>
 """
     )
 
@@ -73,6 +85,7 @@ Index CCTV footage, search it with natural language, and export matched clips wi
             idx_btn = gr.Button("index video", variant="primary")
             idx_md = gr.Markdown()
             idx_file = gr.File(label="index json")
+            gr.Markdown("<div class='cardnote'>Use <b>all</b> if you want broad natural search. Use person or vehicle only when you want faster indexing on long videos.</div>")
 
             gr.Markdown("### query")
             q = gr.Textbox(placeholder="person sitting near gate, white car entering, group at entrance")
@@ -91,11 +104,12 @@ Index CCTV footage, search it with natural language, and export matched clips wi
             out_clips = gr.Files(label="all clips")
             out_files = gr.Files(label="reports")
             raw_json = gr.File(label="raw search json")
+            out_gallery = gr.Gallery(label="matched keyframes", columns=3, height="auto")
 
     idx_btn.click(build_idx, [video, mode, sample_sec, win_sec], [idx_md, idx_file, search_btn])
-    search_btn.click(run_search, [q, top_k, clip_pad], [out_md, out_tbl, out_vid, out_clips, out_files, raw_json])
+    search_btn.click(run_search, [q, top_k, clip_pad], [out_md, out_tbl, out_vid, out_clips, out_files, raw_json, out_gallery])
 
 
 if __name__ == "__main__":
-    share = bool(os.getenv("COLAB_RELEASE_TAG"))
-    demo.launch(server_name="0.0.0.0", share=share, show_error=True)
+    share = bool(os.getenv("COLAB_RELEASE_TAG") or os.getenv("KAGGLE_KERNEL_RUN_TYPE"))
+    demo.queue().launch(server_name="0.0.0.0", share=share, show_error=True)
