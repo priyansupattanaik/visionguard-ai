@@ -91,11 +91,14 @@ class GroundedSegmenter:
         prev = None
         picks = []
         seen = 0
+        first = None
         i = 0
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
+            if first is None:
+                first = frame.copy()
             if i % stride == 0:
                 boxes, scores, _ = self.detect(frame, query)
                 masks = self.segment(frame, boxes[:2]) if boxes else []
@@ -109,4 +112,8 @@ class GroundedSegmenter:
             i += 1
         cap.release()
         out.release()
+        if seen == 0 and first is not None:
+            p = os.path.join(frame_dir, "fallback_00000.jpg")
+            cv2.imwrite(p, first)
+            picks.append(p)
         return out_path, picks, seen

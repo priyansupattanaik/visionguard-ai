@@ -27,17 +27,19 @@ def _meta(meta):
 
 
 def scan(video, q):
+    blank_pick = gr.update(choices=[], value=[])
+    blank_one = gr.update(choices=[], value=None)
     if not video:
-        yield "upload a video first", None, "", [], None, None, gr.update(choices=[], value=[]), None, None, []
+        yield "upload a video first", None, "", [], None, None, blank_pick, blank_one, None, "", None, []
         return
     if not q or not q.strip():
-        yield "enter a natural-language query", None, "", [], None, None, gr.update(choices=[], value=[]), None, None, []
+        yield "enter a natural-language query", None, "", [], None, None, blank_pick, blank_one, None, "", None, []
         return
-    yield "starting scan", None, "", [], None, None, gr.update(choices=[], value=[]), None, None, []
+    yield "starting scan", None, "", [], None, None, blank_pick, blank_one, None, "", None, []
     meta = None
     for ev in pipe.index_video_iter(video):
         if ev["kind"] == "preview":
-            yield ev["status"], ev["image"], "", [], None, None, gr.update(choices=[], value=[]), None, None, []
+            yield ev["status"], ev["image"], "", [], None, None, blank_pick, blank_one, None, "", None, []
         else:
             meta = ev["meta"]
     hits = pipe.search(q.strip(), top_k=4)
@@ -50,7 +52,15 @@ def scan(video, q):
     choices = [x["label"] for x in seg]
     first = seg[0]["clip"] if seg else None
     all_clips = [x["clip"] for x in seg] + [x["raw_clip"] for x in seg]
-    yield "scan complete", None, _meta(meta), rows, first, all_clips, gr.update(choices=choices, value=choices[:1]), gal, q.strip(), seg
+    note = f"### {seg[0]['label']}\n\n{seg[0]['summary']}" if seg else ""
+    yield "scan complete", None, _meta(meta), rows, first, all_clips, gr.update(choices=choices, value=choices[:1]), gr.update(choices=choices, value=choices[0] if choices else None), gal, note, q.strip(), seg
+
+
+def show_match(label, hits):
+    if not hits or not label:
+        return None, [], ""
+    pipe.last_hits = hits
+    return pipe.pick_match(label)
 
 
 def export_selected(picks, q, hits):
@@ -88,7 +98,8 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=gr.themes.Soft(primary_hue
 
         with gr.Column(scale=2):
             table = gr.Dataframe(headers=["rank", "score", "start", "end", "summary", "objects"], interactive=False)
-            clip = gr.Video(label="segmented top clip")
+            pick_one = gr.Dropdown(label="view one match", choices=[], value=None)
+            clip = gr.Video(label="selected match clip")
             clips = gr.Files(label="all matched clips")
             pick = gr.CheckboxGroup(label="choose clips to export")
             export_btn = gr.Button("export selected")
@@ -96,8 +107,10 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=gr.themes.Soft(primary_hue
             html = gr.File(label="html report")
             csv = gr.File(label="csv report")
             gallery = gr.Gallery(label="segmented preview frames", columns=3, height="auto")
+            match_md = gr.Markdown()
 
-    scan_btn.click(scan, [video, query], [status, live, info, table, clip, clips, pick, gallery, q_state, hits_state])
+    scan_btn.click(scan, [video, query], [status, live, info, table, clip, clips, pick, pick_one, gallery, match_md, q_state, hits_state])
+    pick_one.change(show_match, [pick_one, hits_state], [clip, gallery, match_md])
     export_btn.click(export_selected, [pick, q_state, hits_state], [zipf, html, csv])
 
 

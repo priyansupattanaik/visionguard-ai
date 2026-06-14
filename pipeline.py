@@ -226,10 +226,21 @@ class VisionGuardPipeline:
             row["clip"] = seg_clip if seen > 0 else raw
             row["frames"] = frames
             row["segmented"] = bool(seen > 0)
+            if seen == 0:
+                row["summary"] = f"{row['summary']} | no grounded mask, showing raw clip"
             row["label"] = f"{i}. {hit['start']:.2f}s - {hit['end']:.2f}s"
             out.append(row)
         self.last_hits = out
         return out
+
+    def pick_match(self, label):
+        for x in self.last_hits:
+            if x["label"] == label:
+                gal = [(fp, x["label"]) for fp in x["frames"]]
+                clip = x["clip"] if x["clip"] else x["raw_clip"]
+                txt = f"### {x['label']}\n\n{x['summary']}"
+                return clip, gal, txt
+        return None, [], ""
 
     def export_selected(self, picks):
         rows = [x for x in self.last_hits if x["label"] in picks]
