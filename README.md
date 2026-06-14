@@ -11,8 +11,9 @@ Natural-language CCTV search with a scan-first workflow, live indexing preview, 
 
 ## Stack
 
-- `ultralytics` `yolo11s.pt` + ByteTrack for live indexing preview and overlap-heavy tracking
-- `transformers` `google/siglip2-so400m-patch14-384` for text-video retrieval
+- `ultralytics` `yolo11s.pt` + ByteTrack for live indexing preview and object tracking
+- `transformers` `google/siglip2-base-patch16-224` for text-frame retrieval
+- `transformers` `microsoft/xclip-base-patch32` for pretrained event tagging on indexed windows
 - `transformers` `IDEA-Research/grounding-dino-base` for query grounding
 - `transformers` `facebook/sam2.1-hiera-small` for matched clip segmentation
 - `gradio` for the UI
@@ -24,6 +25,8 @@ Natural-language CCTV search with a scan-first workflow, live indexing preview, 
 - Added Grounding DINO + SAM2 segmentation on matched clips
 - Added per-match export with CSV/JSON/HTML/ZIP outputs
 - Reduced repeated downloads by supporting Drive-backed cache in Colab
+- Removed clip extraction from the initial query path so search returns timestamps first and generates clips only when you open or export a match
+- Replaced overlap/motion incident heuristics with pretrained X-CLIP event tagging
 
 ## Local run
 
@@ -109,5 +112,5 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 
 - Mount Drive in Colab before running if you want model downloads cached between sessions.
 - Best experience comes from GPU-backed Colab or GPU-enabled Spaces.
-- Event-like queries such as `car accident`, `collision`, `fight`, or `incident` get extra heuristic boosts from tracked motion and overlap.
+- Event-like queries such as `car accident`, `collision`, `fight`, or `incident` are boosted by pretrained X-CLIP event tags computed during indexing.
 - The UI now also writes a short answer block below the query with timestamps and what was detected in each returned match.

@@ -7,6 +7,7 @@ import numpy as np
 
 from cache_utils import setup_cache
 from clip_generator import ClipGenerator
+from events import EventTagger
 from report_generator import ReportGenerator
 from segmenter import GroundedSegmenter
 from tracker import ObjectTracker
@@ -16,10 +17,11 @@ setup_cache()
 
 
 class VisionGuardPipeline:
-    def __init__(self, out_dir="output", yolo="yolo11s.pt", clip_model="google/siglip2-so400m-patch14-384", gdino="IDEA-Research/grounding-dino-base", sam="facebook/sam2.1-hiera-small"):
+    def __init__(self, out_dir="output", yolo="yolo11s.pt", clip_model="google/siglip2-base-patch16-224", event_model="microsoft/xclip-base-patch32", gdino="IDEA-Research/grounding-dino-base", sam="facebook/sam2.1-hiera-small"):
         self.out_dir = out_dir
         self.trk = ObjectTracker(model=yolo)
         self.enc = SearchEncoder(model=clip_model)
+        self.events = EventTagger(model=event_model)
         self.seg = GroundedSegmenter(gdino=gdino, sam=sam)
         self.idx = None
         self.run_dir = None
@@ -45,31 +47,23 @@ class VisionGuardPipeline:
         bb = max(1.0, (bx2 - bx1) * (by2 - by1))
         return inter / (aa + bb - inter)
 
-    def _incident_tags(self, tracks, meta):
-        tags = []
-        people = [t for t in tracks if t["name"] == "person"]
-        veh = [t for t in tracks if t["name"] in ["car", "truck", "bus", "motorcycle", "bicycle"]]
-        if len(people) >= 2 and meta["moving_tracks"] >= 2:
-            for i in range(len(people)):
-                for j in range(i + 1, len(people)):
-                    if self._iou(people[i]["box"], people[j]["box"]) > 0.08:
-                        tags.append("possible fight")
-                        break
-                if "possible fight" in tags:
-                    break
-        if len(veh) >= 2:
-            for i in range(len(veh)):
-                for j in range(i + 1, len(veh)):
-                    if self._iou(veh[i]["box"], veh[j]["box"]) > 0.12:
-                        tags.append("possible collision")
-                        break
-                if "possible collision" in tags:
-                    break
-        if meta["person"] >= 4:
-            tags.append("crowd")
-        if meta["still_people"] >= 1:
-            tags.append("loitering")
-        return sorted(set(tags))
+    def _event_text(self, rows):
+        return [x["label"] for x in rows]
+
+    def _event_blocks(self, frames, block):
+        rows = []
+        for i in range(0, len(frames), block):
+            chunk = frames[i:i + block]
+            if not chunk:
+                continue
+            tags = self.events.score([x["thumb"] for x in chunk])
+            rows.append({
+                "start": chunk[0]["ts"],
+                "end": chunk[-1]["ts"],
+                "tags": self._event_text(tags),
+                "scores": tags,
+            })
+        return rows
 
     def _new_run(self, video):
         name = os.path.splitext(os.path.basename(video))[0]
@@ -95,6 +89,10 @@ class VisionGuardPipeline:
         cv2.putText(out, f"{ts:.1f}s", (18, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
         return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
 
+    def _thumb(self, frame):
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return cv2.resize(rgb, (224, 224), interpolation=cv2.INTER_AREA)
+
     def index_video_iter(self, video, sample_sec=1.5, win_sec=6.0):
         self._new_run(video)
         self.trk.reset()
@@ -105,7 +103,7 @@ class VisionGuardPipeline:
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         dur = total / fps if fps else 0.0
         step = max(1, int(round(sample_sec * fps)))
-        half = max(1, int(round(win_sec / sample_sec / 2)))
+        block = max(1, int(round(win_sec / sample_sec)))
         frames = []
         hist = {}
         i = 0
@@ -141,33 +139,31 @@ class VisionGuardPipeline:
             meta = {
                 "objects": objs,
                 "tracks": sorted(set(tids)),
-                "moving_tracks": move,
                 "still_people": still if objs.get("person", 0) else 0,
                 "person": objs.get("person", 0),
             }
-            tags = self._incident_tags(tracks, meta)
             emb = self.enc.embed_frame(frame)
             frame_path = os.path.join(self.run_dir, "frames", f"f_{i:06d}.jpg")
             cv2.imwrite(frame_path, frame)
-            frames.append({"frame": i, "ts": ts, "emb": emb, "frame_path": frame_path, "meta": meta, "tags": tags})
+            frames.append({"frame": i, "ts": ts, "emb": emb, "frame_path": frame_path, "meta": meta, "thumb": self._thumb(frame)})
             yield {"kind": "preview", "image": self._preview(frame, tracks, ts), "status": f"scanning {ts:.1f}s / {dur:.1f}s"}
             i += 1
         cap.release()
+        event_blocks = self._event_blocks(frames, block)
         segs = []
         for j, item in enumerate(frames):
-            lo = max(0, j - half)
-            hi = min(len(frames), j + half + 1)
+            lo = (j // block) * block
+            hi = min(len(frames), lo + block)
             chunk = frames[lo:hi]
             emb = np.mean([x["emb"] for x in chunk], axis=0).astype(np.float32)
             emb = emb / max(np.linalg.norm(emb), 1e-6)
             objs = {}
             tids = set()
-            tags = set()
             for x in chunk:
                 tids |= set(x["meta"]["tracks"])
-                tags |= set(x["tags"])
                 for k, v in x["meta"]["objects"].items():
                     objs[k] = max(objs.get(k, 0), v)
+            ev = event_blocks[min(j // block, max(0, len(event_blocks) - 1))] if event_blocks else {"tags": [], "scores": []}
             segs.append({
                 "start": chunk[0]["ts"],
                 "end": chunk[-1]["ts"],
@@ -176,7 +172,8 @@ class VisionGuardPipeline:
                 "frame_path": item["frame_path"],
                 "objects": sorted(objs.keys()),
                 "tracks": sorted(tids),
-                "tags": sorted(tags),
+                "tags": list(ev["tags"]),
+                "event_scores": list(ev["scores"]),
             })
         self.idx = {"video": video, "meta": {"video": video, "fps": fps, "frames": total, "duration": dur, "sample_sec": sample_sec, "win_sec": win_sec, "segments": len(segs)}, "segments": segs}
         path = os.path.join(self.run_dir, "reports", "index.json")
@@ -189,12 +186,12 @@ class VisionGuardPipeline:
         rows = []
         for seg in self.idx["segments"]:
             score = self._cos(qv, seg["emb"])
-            if "fight" in ql and "possible fight" in seg["tags"]:
-                score += 0.35
-            if any(x in ql for x in ["accident", "collision", "crash"]) and "possible collision" in seg["tags"]:
-                score += 0.35
+            for tag in seg["tags"]:
+                tag_l = tag.lower()
+                if any(tok in ql for tok in tag_l.split()):
+                    score += 0.15
             if any(x in ql for x in ["incident", "emergency"]) and seg["tags"]:
-                score += 0.2
+                score += 0.1
             rows.append({
                 "query": q,
                 "score": score,
@@ -221,8 +218,8 @@ class VisionGuardPipeline:
         for i, hit in enumerate(hits, 1):
             row = dict(hit)
             row["match_id"] = i
-            row["raw_clip"] = self.clip.extract_clip(self.idx["video"], hit["start"], hit["end"], self._clip_name(i, "raw"), pad=1.5)
-            row["clip"] = row["raw_clip"]
+            row["raw_clip"] = None
+            row["clip"] = None
             row["frames"] = []
             row["segmented"] = False
             row["label"] = f"{i}. {hit['start']:.2f}s - {hit['end']:.2f}s"
@@ -230,9 +227,18 @@ class VisionGuardPipeline:
         self.last_hits = out
         return out
 
+    def _ensure_raw_clip(self, row):
+        if row["raw_clip"]:
+            return row["raw_clip"]
+        row["raw_clip"] = self.clip.extract_clip(self.idx["video"], row["start"], row["end"], self._clip_name(row["match_id"], "raw"), pad=1.5)
+        if not row["clip"]:
+            row["clip"] = row["raw_clip"]
+        return row["raw_clip"]
+
     def _segment_row(self, row, query):
         if row["segmented"]:
             return row
+        self._ensure_raw_clip(row)
         seg_dir = os.path.join(self.run_dir, "segments", f"m_{row['match_id']:02d}")
         os.makedirs(seg_dir, exist_ok=True)
         seg_mp4 = os.path.join(self.run_dir, "clips", f"{self._clip_name(row['match_id'], 'seg')}.mp4")
@@ -247,6 +253,7 @@ class VisionGuardPipeline:
     def pick_match(self, label, query):
         for x in self.last_hits:
             if x["label"] == label:
+                self._ensure_raw_clip(x)
                 self._segment_row(x, query)
                 gal = [(fp, x["label"]) for fp in x["frames"]]
                 clip = x["clip"] if x["clip"] else x["raw_clip"]
