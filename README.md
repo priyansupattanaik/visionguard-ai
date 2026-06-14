@@ -7,21 +7,22 @@ pinned: false
 
 # VisionGuard AI
 
-Natural-language search for CCTV video with matched clip export, timestamp records, and a Gradio UI that can run in Google Colab or Hugging Face Spaces.
+Natural-language CCTV search with fast retrieval, Qwen2.5-VL-7B verification, matched clip export, and timestamp records.
 
 ## Stack
 
 - `ultralytics` YOLO + ByteTrack for object tracking
-- `transformers` CLIP for text-image retrieval
+- `transformers` SigLIP2 for fast retrieval
+- `transformers` Qwen2.5-VL-7B-Instruct for top-k verification
 - `gradio` for the UI
 - OpenCV for video read/write
 
 ## What changed
 
-- Removed the per-frame 3B VLM loop
-- Replaced placeholder string search with embedding search
+- Removed the old placeholder search path
+- Added Qwen2.5-VL-7B verification on the top candidate clips
 - Added multi-clip export, CSV/JSON/HTML reports, and zip download
-- Kept the code light enough for Colab and realistic for Spaces
+- Kept indexing fast enough for Colab while using a stronger verifier
 
 ## Local run
 
@@ -66,8 +67,8 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 
 ### Notes
 
-- CPU Spaces will work but will be slower for long videos.
-- For better search speed and tracking, use a GPU Space if available.
+- CPU Spaces will work but will be slow for long videos.
+- Qwen2.5-VL-7B verification is practical on GPU Spaces, not ideal on free CPU Spaces.
 - If you want tighter version control, add `sdk_version` in the YAML block at the top of this file.
 
 ## Search flow
@@ -80,5 +81,5 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 ## Notes
 
 - Default tracking focus can be `all`, `person`, or `vehicle`.
-- For long videos on CPU, increase `sample every (sec)` to speed up indexing.
-- Best accuracy comes from GPU-backed Colab or GPU-enabled Spaces.
+- For long videos, increase `sample every (sec)` to speed up indexing.
+- Best accuracy comes from GPU-backed Colab or GPU-enabled Spaces because Qwen2.5-VL-7B is used in the verification stage.

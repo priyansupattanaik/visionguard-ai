@@ -35,14 +35,3 @@ class ClipGenerator:
         cap.release()
         out.release()
         return path
-
-    def extract_many(self, video, hits, pad=2.0):
-        out = []
-        for i, hit in enumerate(hits, 1):
-            q = hit.get("query") or f"hit_{i}"
-            name = f"{i:02d}_{q}"
-            path = self.extract_clip(video, hit["start"], hit["end"], name, pad=pad)
-            x = dict(hit)
-            x["clip"] = path
-            out.append(x)
-        return out

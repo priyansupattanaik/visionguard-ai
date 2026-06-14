@@ -24,7 +24,7 @@ class ReportGenerator:
             for i, row in enumerate(rows, 1):
                 w.writerow({
                     "rank": i,
-                    "score": round(row.get("score", 0.0), 4),
+                    "score": round(row.get("qwen_score", row.get("score", 0.0)), 4),
                     "start": round(row.get("start", 0.0), 2),
                     "end": round(row.get("end", 0.0), 2),
                     "duration": round(row.get("end", 0.0) - row.get("start", 0.0), 2),
@@ -78,7 +78,7 @@ class ReportGenerator:
         <tr>
           <td>{{ loop.index }}</td>
           <td>{{ "%.2f"|format(x.start) }}s - {{ "%.2f"|format(x.end) }}s</td>
-          <td class="score">{{ "%.4f"|format(x.score) }}</td>
+          <td class="score">{{ "%.4f"|format(x.qwen_score if x.qwen_score is defined else x.score) }}</td>
           <td>{{ x.summary }}</td>
           <td>{{ x.objects|join(", ") }}</td>
           <td>{{ x.clip }}</td>

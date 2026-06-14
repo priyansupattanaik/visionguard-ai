@@ -41,21 +41,23 @@ def build_idx(video, mode, sample_sec, win_sec, progress=gr.Progress()):
     return _fmt_meta(res["meta"]), res["index_json"], gr.update(interactive=True)
 
 
-def run_search(q, top_k, clip_pad):
+def run_search(q, top_k, verify_k, clip_pad, progress=gr.Progress()):
     if not pipe.idx:
         return "index a video first", [], None, None, None, None, None
     if not q or not q.strip():
         return "enter a natural-language query", [], None, None, None, None, None
-    hits = pipe.search(q.strip(), top_k=int(top_k))
-    exp = pipe.export_hits(q.strip(), hits, clip_pad=clip_pad)
+    hits = pipe.search(q.strip(), top_k=max(int(top_k), int(verify_k)))
+    hits = pipe.verify(q.strip(), hits[: int(verify_k)], clip_pad=clip_pad, progress=progress)
+    hits = hits[: int(top_k)]
+    exp = pipe.export_hits(q.strip(), hits)
     rows = []
     md = [f"## matches for `{q}`", ""]
     gal = []
     if not exp["hits"]:
         md.append("no strong matches found")
     for i, x in enumerate(exp["hits"], 1):
-        rows.append([i, round(x["score"], 4), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])])
-        md.append(f"{i}. `{x['start']:.2f}s - {x['end']:.2f}s` score `{x['score']:.4f}`  ")
+        rows.append([i, round(x["qwen_score"], 4), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])])
+        md.append(f"{i}. `{x['start']:.2f}s - {x['end']:.2f}s` score `{x['qwen_score']:.4f}`  ")
         md.append(f"   {x['summary']}")
         gal.append((x["frame_path"], f"{i}. {x['start']:.2f}s - {x['end']:.2f}s"))
     first = exp["hits"][0]["clip"] if exp["hits"] else None
@@ -90,6 +92,7 @@ with gr.Blocks(title="VisionGuard AI", theme=gr.themes.Soft(primary_hue="cyan", 
             gr.Markdown("### query")
             q = gr.Textbox(placeholder="person sitting near gate, white car entering, group at entrance")
             top_k = gr.Slider(1, 10, value=5, step=1, label="top clips")
+            verify_k = gr.Slider(1, 8, value=4, step=1, label="qwen verify clips")
             clip_pad = gr.Slider(0.0, 6.0, value=2.0, step=0.5, label="clip padding (sec)")
             src = ["assets/asset1.mp4", "assets/asset2.mp4", "assets/asset3.mp4"]
             good = [x for x in src if os.path.exists(x)]
@@ -107,7 +110,7 @@ with gr.Blocks(title="VisionGuard AI", theme=gr.themes.Soft(primary_hue="cyan", 
             out_gallery = gr.Gallery(label="matched keyframes", columns=3, height="auto")
 
     idx_btn.click(build_idx, [video, mode, sample_sec, win_sec], [idx_md, idx_file, search_btn])
-    search_btn.click(run_search, [q, top_k, clip_pad], [out_md, out_tbl, out_vid, out_clips, out_files, raw_json, out_gallery])
+    search_btn.click(run_search, [q, top_k, verify_k, clip_pad], [out_md, out_tbl, out_vid, out_clips, out_files, raw_json, out_gallery])
 
 
 if __name__ == "__main__":

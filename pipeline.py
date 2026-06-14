@@ -1,4 +1,3 @@
-import json
 import os
 import shutil
 from datetime import datetime
@@ -9,16 +8,15 @@ import numpy as np
 from clip_generator import ClipGenerator
 from report_generator import ReportGenerator
 from tracker import ObjectTracker
-from vlm import SearchEncoder
+from vlm import QwenVerifier, SearchEncoder
 
 
 class VisionGuardPipeline:
-    def __init__(self, out_dir="output", yolo="yolo11n.pt", clip_model="openai/clip-vit-base-patch32"):
+    def __init__(self, out_dir="output", yolo="yolo11n.pt", clip_model="google/siglip2-base-patch16-224", qwen_model="Qwen/Qwen2.5-VL-7B-Instruct"):
         self.out_dir = out_dir
-        self.yolo = yolo
-        self.clip_model = clip_model
         self.trk = ObjectTracker(model=yolo)
         self.enc = SearchEncoder(model=clip_model)
+        self.vfy = QwenVerifier(model=qwen_model)
         self.idx = None
         self.run_dir = None
         self.clip = None
@@ -46,7 +44,6 @@ class VisionGuardPipeline:
         self.run_dir = os.path.join(self.out_dir, f"{name}_{stamp}")
         if os.path.exists(self.run_dir):
             shutil.rmtree(self.run_dir)
-        os.makedirs(self.run_dir, exist_ok=True)
         os.makedirs(os.path.join(self.run_dir, "frames"), exist_ok=True)
         os.makedirs(os.path.join(self.run_dir, "clips"), exist_ok=True)
         os.makedirs(os.path.join(self.run_dir, "reports"), exist_ok=True)
@@ -114,6 +111,10 @@ class VisionGuardPipeline:
             "person": objs.get("person", 0),
         }
 
+    def _meta_txt(self, meta):
+        obj = ", ".join(f"{k}:{v}" for k, v in sorted(meta["objects"].items()))
+        return f"objects[{obj}] moving[{meta['moving_tracks']}] still_people[{meta['still_people']}] tracks[{len(meta['tracks'])}]"
+
     def _save_frame(self, frame, i):
         path = os.path.join(self.run_dir, "frames", f"f_{i:06d}.jpg")
         cv2.imwrite(path, frame)
@@ -132,6 +133,7 @@ class VisionGuardPipeline:
                 prv["objects"] = sorted(set(prv["objects"]) | set(cur["objects"]))
                 prv["tracks"] = sorted(set(prv["tracks"]) | set(cur["tracks"]))
                 prv["summary"] = cur["summary"] if cur["score"] >= prv["score"] else prv["summary"]
+                prv["meta_txt"] = cur["meta_txt"] if cur["score"] >= prv["score"] else prv["meta_txt"]
                 continue
             out.append(dict(cur))
         return out
@@ -219,6 +221,7 @@ class VisionGuardPipeline:
                 "frame_path": item["frame_path"],
                 "meta": meta,
                 "summary": self._seg_summary(meta),
+                "meta_txt": self._meta_txt(meta),
             })
         meta = {
             "video": video,
@@ -229,7 +232,7 @@ class VisionGuardPipeline:
             "win_sec": win_sec,
             "segments": len(segs),
         }
-        self.idx = {"video": video, "meta": meta, "frames": frames, "segments": segs}
+        self.idx = {"video": video, "meta": meta, "segments": segs}
         slim = {
             "meta": meta,
             "segments": [{
@@ -245,7 +248,7 @@ class VisionGuardPipeline:
         self.rep.write_json(path, slim)
         return {"run_dir": self.run_dir, "meta": meta, "index_json": path}
 
-    def search(self, q, top_k=5):
+    def search(self, q, top_k=6):
         if not self.idx:
             raise ValueError("index not ready")
         qv = self.enc.embed_text(q)
@@ -253,25 +256,43 @@ class VisionGuardPipeline:
         for seg in self.idx["segments"]:
             base = self._cos(qv, seg["emb"])
             bonus = self._obj_bonus(q, seg["meta"]["objects"]) + self._act_bonus(q, seg["meta"])
-            score = base + bonus
             rows.append({
                 "query": q,
-                "score": score,
+                "score": base + bonus,
                 "start": seg["start"],
                 "end": seg["end"],
                 "summary": seg["summary"],
                 "objects": sorted(seg["meta"]["objects"].keys()),
                 "tracks": seg["meta"]["tracks"],
                 "frame_path": seg["frame_path"],
+                "meta_txt": seg["meta_txt"],
             })
         rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         rows = self._merge_hits(rows[: max(top_k * 3, 12)])
         return rows[:top_k]
 
-    def export_hits(self, q, hits, clip_pad=2.0):
+    def verify(self, q, hits, clip_pad=2.0, progress=None):
         if not self.idx:
             raise ValueError("index not ready")
-        hits = self.clip.extract_many(self.idx["video"], hits, pad=clip_pad)
+        out = []
+        n = max(len(hits), 1)
+        for i, hit in enumerate(hits, 1):
+            clip = self.clip.extract_clip(self.idx["video"], hit["start"], hit["end"], f"qwen_{i:02d}", pad=clip_pad)
+            chk = self.vfy.verify(clip, q, meta=hit["meta_txt"])
+            row = dict(hit)
+            row["clip"] = clip
+            row["match"] = chk["match"]
+            row["qwen_score"] = round(chk["score"], 4)
+            row["summary"] = chk["summary"] or row["summary"]
+            out.append(row)
+            if progress:
+                progress(i / n, desc=f"qwen verify {i}/{n}")
+        out.sort(key=lambda x: (x["match"], x["qwen_score"], x["score"]), reverse=True)
+        return out
+
+    def export_hits(self, q, hits):
+        if not self.idx:
+            raise ValueError("index not ready")
         payload = {
             "query": q,
             "video": self.idx["video"],
