@@ -82,6 +82,336 @@ Runtime folders:
 - `output/`: generated run outputs
 - `.yolo/`: Ultralytics settings/model metadata
 
+## 5A. Architecture Overview
+
+The project follows a modular pipeline architecture.
+
+Main layers:
+
+1. Presentation layer
+2. Orchestration layer
+3. Vision analysis layer
+4. Search and ranking layer
+5. Localization and segmentation layer
+6. Export and reporting layer
+7. Runtime/cache layer
+
+### 5A.1 Presentation Layer
+
+The presentation layer is the Gradio app in [app.py](/D:/CDAC_PROJECT/CV_Project/app.py:1).
+
+It handles:
+
+- video upload
+- scan button
+- query input
+- result display
+- clip selection
+- export actions
+
+It does not implement the vision logic itself.
+
+Its job is:
+
+- gather user input
+- call the pipeline
+- render outputs returned from the pipeline
+
+### 5A.2 Orchestration Layer
+
+The orchestration layer is [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:1).
+
+This is the backend coordinator.
+
+It decides:
+
+- when to scan
+- when to search
+- when to trim clips
+- when to start background jobs
+- when to run localization and segmentation
+- when to export files
+
+This file is the real backend spine of the project.
+
+### 5A.3 Vision Analysis Layer
+
+The vision analysis layer is split across:
+
+- [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1)
+- [vlm.py](/D:/CDAC_PROJECT/CV_Project/vlm.py:1)
+- [events.py](/D:/CDAC_PROJECT/CV_Project/events.py:1)
+- [locate_anything.py](/D:/CDAC_PROJECT/CV_Project/locate_anything.py:1)
+- [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1)
+
+Each module owns one kind of model behavior instead of mixing everything in one file.
+
+### 5A.4 Search and Ranking Layer
+
+This is conceptually inside [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:179).
+
+It uses:
+
+- SigLIP2 embedding similarity
+- event-tag boosts
+- deduplication of near-identical windows
+
+This layer turns indexed windows into ranked matches.
+
+### 5A.5 Localization and Segmentation Layer
+
+This layer is handled by [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:12).
+
+Its job starts only after a match is already found.
+
+It uses:
+
+- LocateAnything-3B for primary grounding
+- Grounding DINO as fallback grounding
+- SAM2 for masks
+
+### 5A.6 Export and Reporting Layer
+
+This layer is split across:
+
+- [clip_generator.py](/D:/CDAC_PROJECT/CV_Project/clip_generator.py:1)
+- [report_generator.py](/D:/CDAC_PROJECT/CV_Project/report_generator.py:1)
+
+It handles:
+
+- raw clip generation
+- segmented clip generation
+- browser-ready video finalize
+- JSON/CSV/HTML/ZIP outputs
+
+### 5A.7 Runtime and Cache Layer
+
+This layer is [cache_utils.py](/D:/CDAC_PROJECT/CV_Project/cache_utils.py:1).
+
+It configures cache paths in Colab so:
+
+- Hugging Face files persist
+- Torch caches persist
+- Ultralytics settings persist
+
+This is important because model download cost is large in Colab.
+
+## 5B. Backend Working Explained
+
+This section describes how the backend actually processes a request.
+
+### 5B.1 App Startup
+
+When `python app.py` starts:
+
+1. `setup_cache()` runs first.
+2. The `VisionGuardPipeline` object is created.
+3. The Gradio UI tree is created.
+4. No heavy model is loaded immediately just because the app started.
+
+The models use lazy loading.
+
+That means:
+
+- the app object is created first
+- models load when their first real task is called
+
+Why:
+
+- faster startup
+- avoids loading every model if the user never reaches a later stage
+
+### 5B.2 What Happens During Scan
+
+When the user clicks `step 1: scan video`:
+
+`app.py` calls `scan_only(video)`, which then iterates over `pipe.index_video_iter(video)`.
+
+Inside `index_video_iter(...)`:
+
+1. A new run folder is created under `output/`.
+2. The tracker state is reset.
+3. OpenCV opens the source video.
+4. Video metadata is read:
+   - fps
+   - frame count
+   - duration
+5. The sampling stride is computed from `sample_sec`.
+6. The video is read frame by frame.
+7. Only sampled frames are sent into the heavy semantic indexing path.
+
+For each sampled frame:
+
+1. YOLO + ByteTrack produce tracked objects.
+2. Object counts and ids are collected.
+3. A live preview overlay is drawn.
+4. SigLIP2 creates a frame embedding.
+5. A thumbnail is created for event tagging.
+6. The raw frame is saved to `output/.../frames`.
+7. A preview event is yielded back to Gradio.
+
+That yield behavior is important.
+
+It means the backend is streaming progress to the UI while scanning, not waiting until the entire scan finishes.
+
+### 5B.3 What Happens After Frame Scan Completes
+
+After all sampled frames are collected:
+
+1. X-CLIP scores event labels on chunks of sampled thumbnails.
+2. Nearby sampled frames are grouped into windows.
+3. Window embeddings are averaged.
+4. Object names and track ids are aggregated.
+5. Event tags are attached to each window.
+6. The final search index is stored in memory in `self.idx`.
+7. A JSON index report is also written to disk.
+
+At this point the video is searchable.
+
+### 5B.4 What Is Stored in Memory
+
+The most important backend state after scan is `self.idx` in [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:174).
+
+It contains:
+
+- source video path
+- video metadata
+- indexed windows
+
+Each indexed window stores:
+
+- start time
+- end time
+- midpoint
+- embedding vector
+- representative frame path
+- object names
+- track ids
+- event tags
+
+This in-memory index is the reason repeated queries are possible without rescanning.
+
+### 5B.5 What Happens During Search
+
+When the user clicks `step 2: find matches`:
+
+1. `app.py` calls `find_query(q)`.
+2. `find_query(q)` calls `pipe.search(q, top_k=4)`.
+3. The query is embedded with SigLIP2.
+4. Cosine similarity is computed against every indexed window.
+5. Event-tag overlap adds a small score boost.
+6. Top windows are sorted.
+7. Nearby duplicate windows are filtered.
+
+This stage is search only.
+
+It does not scan the video from scratch again.
+
+### 5B.6 What Happens Right After Search
+
+Search results are converted into hit rows in `prepare_hits(...)`.
+
+That method:
+
+- stores hit metadata in `self.last_hits`
+- prepares the first raw clip immediately
+- starts background raw-clip jobs for the remaining hits
+- starts background segmentation for the first hit
+
+Why this matters:
+
+- the first result becomes watchable sooner
+- the user does not wait for every clip before interacting
+
+### 5B.7 Background Jobs
+
+The backend uses `ThreadPoolExecutor` in [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:29).
+
+Background jobs are used for:
+
+- raw clip trimming
+- segmented clip generation
+
+This is backend optimization, not just UI behavior.
+
+The important idea is:
+
+- the pipeline returns control early
+- clip processing continues in worker threads
+
+### 5B.8 What Happens When a Match Is Opened
+
+When the user selects a specific match:
+
+1. `app.py` calls `show_match(...)`.
+2. `show_match(...)` calls `pipe.pick_match(label, q)`.
+3. The backend checks whether the raw clip is already ready.
+4. The backend checks whether segmented output is already finished.
+5. If not ready, it returns the raw clip first and keeps segmentation in background.
+6. If ready, it returns the segmented clip and preview frames.
+
+This is why the current backend tries not to block clip viewing.
+
+### 5B.9 How Localization Works Internally
+
+For matched frames:
+
+1. `LocateAnythingGrounder.detect(...)` is tried first.
+2. It sends image + prompt to `nvidia/LocateAnything-3B`.
+3. It parses `<box><...></box>` style outputs into pixel boxes.
+4. If it fails or gives nothing, Grounding DINO is used.
+
+This is done in [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:32).
+
+### 5B.10 How Segmentation Works Internally
+
+Once boxes are available:
+
+1. SAM2 receives the frame and boxes.
+2. SAM2 returns masks.
+3. The backend overlays masks on the frame.
+4. Preview images are saved to the run folder.
+5. A segmented video is rendered.
+
+This segmented output is post-match refinement, not part of the primary retrieval stage.
+
+### 5B.11 How Clip Writing Is Protected
+
+The backend uses atomic file handling for clip outputs.
+
+Process:
+
+1. write to a temporary `.part.mp4`
+2. finish the writer
+3. optionally re-encode to browser-friendly H.264 with ffmpeg
+4. rename to final `.mp4`
+
+Why:
+
+- prevents half-written clips from being shown
+- fixes damaged header problems when background tasks and UI access overlap
+
+### 5B.12 How Export Works Internally
+
+When export is triggered:
+
+1. selected hit rows are resolved
+2. segmentation is ensured for those rows
+3. JSON report is written
+4. CSV report is written
+5. HTML report is written
+6. ZIP archive is written
+
+The backend therefore treats export as a finalization stage.
+
+## 5C. Backend Data Flow Summary
+
+Conceptual backend data flow:
+
+`video path -> sampled frames -> tracking/meta -> embeddings -> event tags -> indexed windows -> query embedding -> ranked hits -> raw clips -> grounded boxes -> masks -> exports`
+
+This is the shortest accurate summary of the backend processing chain.
+
 ## 6. End-to-End Technical Flow
 
 ### 6.1 Video Input
