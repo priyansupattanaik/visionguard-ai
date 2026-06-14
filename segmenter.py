@@ -7,13 +7,15 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor, Sam2Model, Sam2Processor
+from locate_anything import LocateAnythingGrounder
 
 
 class GroundedSegmenter:
-    def __init__(self, gdino="IDEA-Research/grounding-dino-base", sam="facebook/sam2.1-hiera-small", device=None):
+    def __init__(self, gdino="IDEA-Research/grounding-dino-base", sam="facebook/sam2.1-hiera-small", locate_model="nvidia/LocateAnything-3B", device=None):
         self.gdino_name = gdino
         self.sam_name = sam
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.loc = LocateAnythingGrounder(model=locate_model, device=self.dev)
         self.dp = None
         self.dm = None
         self.sp = None
@@ -32,6 +34,10 @@ class GroundedSegmenter:
                 self.sm.to(self.dev)
 
     def detect(self, frame, query, box_thr=0.28, text_thr=0.2):
+        boxes, scores, answer = self.loc.detect(frame, query)
+        if boxes:
+            texts = [query.strip().lower()] * len(boxes)
+            return boxes, scores, texts
         self.load()
         img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         labels = [[query.strip().lower()]]
