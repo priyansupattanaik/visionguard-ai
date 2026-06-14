@@ -26,22 +26,27 @@ def _meta(meta):
     )
 
 
-def scan(video, q):
-    blank_pick = gr.update(choices=[], value=[])
-    blank_one = gr.update(choices=[], value=None)
+def scan_only(video):
     if not video:
-        yield "upload a video first", None, "", [], None, None, blank_pick, blank_one, None, "", None, []
+        yield "upload a video first", None, "", gr.update(interactive=False), "", []
         return
-    if not q or not q.strip():
-        yield "enter a natural-language query", None, "", [], None, None, blank_pick, blank_one, None, "", None, []
-        return
-    yield "starting scan", None, "", [], None, None, blank_pick, blank_one, None, "", None, []
+    yield "starting scan", None, "", gr.update(interactive=False), "", []
     meta = None
     for ev in pipe.index_video_iter(video):
         if ev["kind"] == "preview":
-            yield ev["status"], ev["image"], "", [], None, None, blank_pick, blank_one, None, "", None, []
+            yield ev["status"], ev["image"], "", gr.update(interactive=False), "", []
         else:
             meta = ev["meta"]
+    yield "scan complete", None, _meta(meta), gr.update(interactive=True), "", []
+
+
+def find_query(q):
+    blank_pick = gr.update(choices=[], value=[])
+    blank_one = gr.update(choices=[], value=None)
+    if not pipe.idx:
+        return "scan a video first", [], None, None, blank_pick, blank_one, None, "", "", []
+    if not q or not q.strip():
+        return "enter a natural-language query", [], None, None, blank_pick, blank_one, None, "", "", []
     hits = pipe.search(q.strip(), top_k=4)
     seg = pipe.segment_hits(hits, q.strip())
     rows = [[i, round(x["score"], 4), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])] for i, x in enumerate(seg, 1)]
@@ -53,7 +58,7 @@ def scan(video, q):
     first = seg[0]["clip"] if seg else None
     all_clips = [x["clip"] for x in seg] + [x["raw_clip"] for x in seg]
     note = f"### {seg[0]['label']}\n\n{seg[0]['summary']}" if seg else ""
-    yield "scan complete", None, _meta(meta), rows, first, all_clips, gr.update(choices=choices, value=choices[:1]), gr.update(choices=choices, value=choices[0] if choices else None), gal, note, q.strip(), seg
+    return "matches ready", rows, first, all_clips, gr.update(choices=choices, value=choices[:1]), gr.update(choices=choices, value=choices[0] if choices else None), gal, note, q.strip(), seg
 
 
 def show_match(label, hits):
@@ -75,7 +80,7 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=gr.themes.Soft(primary_hue
         """
 <div class="hero">
   <h1>VisionGuard AI</h1>
-  <p>Upload a video, type a query, watch indexing live, review each matched segmented clip, and export only the clips you want.</p>
+  <p>Step 1: scan the video. Step 2: write a query and find matches. Then review each match and export only what you want.</p>
 </div>
 """
     )
@@ -85,16 +90,18 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=gr.themes.Soft(primary_hue
     with gr.Row():
         with gr.Column(scale=1):
             video = gr.Video(label="cctv video")
-            query = gr.Textbox(label="query", placeholder="person sitting near gate, white car entering, fight near road, car accident")
             src = ["assets/asset1.mp4", "assets/asset2.mp4", "assets/asset3.mp4"]
             good = [x for x in src if os.path.exists(x)]
             if good:
                 gr.Examples(good, inputs=video, label="sample videos")
-            scan_btn = gr.Button("scan video", variant="primary")
+            scan_btn = gr.Button("step 1: scan video", variant="primary")
             status = gr.Markdown("ready")
             live = gr.Image(label="live indexing preview", interactive=False)
             info = gr.Markdown()
-            gr.Markdown("<div class='card'>In Colab, mount Drive once. After that, use git pull in the same folder instead of deleting and cloning the repo again.</div>")
+            gr.Markdown("<div class='card'>After scanning finishes, the query box becomes active. In Colab, mount Drive once and use git pull for updates.</div>")
+
+            query = gr.Textbox(label="query", placeholder="person sitting near gate, white car entering, fight near road, car accident", interactive=False)
+            find_btn = gr.Button("step 2: find matches", interactive=False)
 
         with gr.Column(scale=2):
             table = gr.Dataframe(headers=["rank", "score", "start", "end", "summary", "objects"], interactive=False)
@@ -109,7 +116,9 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=gr.themes.Soft(primary_hue
             gallery = gr.Gallery(label="segmented preview frames", columns=3, height="auto")
             match_md = gr.Markdown()
 
-    scan_btn.click(scan, [video, query], [status, live, info, table, clip, clips, pick, pick_one, gallery, match_md, q_state, hits_state])
+    scan_btn.click(scan_only, [video], [status, live, info, query, q_state, hits_state])
+    scan_btn.click(lambda: gr.update(interactive=True), None, find_btn)
+    find_btn.click(find_query, [query], [status, table, clip, clips, pick, pick_one, gallery, match_md, q_state, hits_state])
     pick_one.change(show_match, [pick_one, hits_state], [clip, gallery, match_md])
     export_btn.click(export_selected, [pick, q_state, hits_state], [zipf, html, csv])
 
