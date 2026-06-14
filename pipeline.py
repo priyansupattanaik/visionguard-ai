@@ -28,6 +28,9 @@ class VisionGuardPipeline:
         self.last_hits = []
         os.makedirs(out_dir, exist_ok=True)
 
+    def _clip_name(self, i, kind):
+        return f"match_{i:02d}_{kind}"
+
     def _iou(self, a, b):
         ax1, ay1, ax2, ay2 = a
         bx1, by1, bx2, by2 = b
@@ -213,39 +216,50 @@ class VisionGuardPipeline:
             out.append(row)
         return out
 
-    def segment_hits(self, hits, query):
+    def prepare_hits(self, hits, query):
         out = []
         for i, hit in enumerate(hits, 1):
-            raw = self.clip.extract_clip(self.idx["video"], hit["start"], hit["end"], f"match_{i:02d}_raw", pad=1.5)
-            seg_dir = os.path.join(self.run_dir, "segments", f"m_{i:02d}")
-            os.makedirs(seg_dir, exist_ok=True)
-            seg_mp4 = os.path.join(self.run_dir, "clips", f"match_{i:02d}_seg.mp4")
-            seg_clip, frames, seen = self.seg.segment_clip(raw, query, seg_mp4, seg_dir, stride=3)
             row = dict(hit)
-            row["raw_clip"] = raw
-            row["clip"] = seg_clip if seen > 0 else raw
-            row["frames"] = frames
-            row["segmented"] = bool(seen > 0)
-            if seen == 0:
-                row["summary"] = f"{row['summary']} | no grounded mask, showing raw clip"
+            row["match_id"] = i
+            row["raw_clip"] = self.clip.extract_clip(self.idx["video"], hit["start"], hit["end"], self._clip_name(i, "raw"), pad=1.5)
+            row["clip"] = row["raw_clip"]
+            row["frames"] = []
+            row["segmented"] = False
             row["label"] = f"{i}. {hit['start']:.2f}s - {hit['end']:.2f}s"
             out.append(row)
         self.last_hits = out
         return out
 
-    def pick_match(self, label):
+    def _segment_row(self, row, query):
+        if row["segmented"]:
+            return row
+        seg_dir = os.path.join(self.run_dir, "segments", f"m_{row['match_id']:02d}")
+        os.makedirs(seg_dir, exist_ok=True)
+        seg_mp4 = os.path.join(self.run_dir, "clips", f"{self._clip_name(row['match_id'], 'seg')}.mp4")
+        seg_clip, frames, seen = self.seg.segment_clip(row["raw_clip"], query, seg_mp4, seg_dir, stride=3)
+        row["clip"] = seg_clip if seen > 0 else row["raw_clip"]
+        row["frames"] = frames
+        row["segmented"] = bool(seen > 0)
+        if seen == 0 and "no grounded mask, showing raw clip" not in row["summary"]:
+            row["summary"] = f"{row['summary']} | no grounded mask, showing raw clip"
+        return row
+
+    def pick_match(self, label, query):
         for x in self.last_hits:
             if x["label"] == label:
+                self._segment_row(x, query)
                 gal = [(fp, x["label"]) for fp in x["frames"]]
                 clip = x["clip"] if x["clip"] else x["raw_clip"]
                 txt = f"### {x['label']}\n\n{x['summary']}"
                 return clip, gal, txt
         return None, [], ""
 
-    def export_selected(self, picks):
+    def export_selected(self, picks, query):
         rows = [x for x in self.last_hits if x["label"] in picks]
         if not rows:
             return None, None, None
+        for row in rows:
+            self._segment_row(row, query)
         base = datetime.now().strftime("%Y%m%d_%H%M%S")
         js = self.rep.write_json(os.path.join(self.run_dir, "reports", f"selected_{base}.json"), {"hits": rows})
         csv = self.rep.write_csv(os.path.join(self.run_dir, "reports", f"selected_{base}.csv"), rows)
