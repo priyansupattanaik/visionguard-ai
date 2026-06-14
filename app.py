@@ -71,8 +71,10 @@ def find_query(q):
     rows = [[i, round(x["score"], 4), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])] for i, x in enumerate(seg, 1)]
     ans = _ans(q.strip(), seg)
     choices = [x["label"] for x in seg]
-    note = f"### {seg[0]['label']}\n\n{seg[0]['summary']}\n\nopen a match to generate the clip and segmentation." if seg else ""
-    return "matches ready", ans, rows, None, [], gr.update(choices=choices, value=choices[:1]), gr.update(choices=choices, value=choices[0] if choices else None), [], note, q.strip(), seg, gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+    first = seg[0]["raw_clip"] if seg else None
+    ready = [x["raw_clip"] for x in seg if x["raw_clip"]]
+    note = f"### {seg[0]['label']}\n\n{seg[0]['summary']}\n\nfirst clip is ready now. other clips are trimming in the background." if seg else ""
+    return "matches ready", ans, rows, first, ready, gr.update(choices=choices, value=choices[:1]), gr.update(choices=choices, value=choices[0] if choices else None), [], note, q.strip(), seg, gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
 
 
 def show_match(label, q, hits):

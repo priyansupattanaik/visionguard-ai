@@ -12,6 +12,17 @@ class ClipGenerator:
         txt = re.sub(r"[^a-zA-Z0-9_-]+", "_", txt.strip().lower())
         return txt[:60] or "clip"
 
+    def clip_path(self, video, st, ed, name, pad=2.0):
+        cap = cv2.VideoCapture(video)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        cap.release()
+        st = max(0.0, st - pad)
+        ed = min(total / fps if fps else ed, ed + pad)
+        s0 = int(st * fps)
+        s1 = int(ed * fps)
+        return os.path.join(self.out_dir, f"{self._safe(name)}_{s0}_{s1}.mp4")
+
     def extract_clip(self, video, st, ed, name, pad=2.0):
         cap = cv2.VideoCapture(video)
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0

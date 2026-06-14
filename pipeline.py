@@ -1,5 +1,6 @@
 import os
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import cv2
@@ -28,6 +29,9 @@ class VisionGuardPipeline:
         self.clip = None
         self.rep = None
         self.last_hits = []
+        self.pool = ThreadPoolExecutor(max_workers=2)
+        self.raw_jobs = {}
+        self.seg_jobs = {}
         os.makedirs(out_dir, exist_ok=True)
 
     def _clip_name(self, i, kind):
@@ -75,6 +79,8 @@ class VisionGuardPipeline:
             os.makedirs(os.path.join(self.run_dir, x), exist_ok=True)
         self.clip = ClipGenerator(os.path.join(self.run_dir, "clips"))
         self.rep = ReportGenerator(os.path.join(self.run_dir, "reports"))
+        self.raw_jobs = {}
+        self.seg_jobs = {}
 
     def _cos(self, a, b):
         den = float(np.linalg.norm(a) * np.linalg.norm(b))
@@ -225,39 +231,95 @@ class VisionGuardPipeline:
             row["label"] = f"{i}. {hit['start']:.2f}s - {hit['end']:.2f}s"
             out.append(row)
         self.last_hits = out
+        if out:
+            self._ensure_raw_clip(out[0], wait=True)
+            self._start_segment(out[0], query)
+            for row in out[1:]:
+                self._ensure_raw_clip(row, wait=False)
         return out
 
-    def _ensure_raw_clip(self, row):
+    def _build_raw_clip(self, row):
+        name = self._clip_name(row["match_id"], "raw")
+        path = self.clip.clip_path(self.idx["video"], row["start"], row["end"], name, pad=1.5)
+        if os.path.exists(path):
+            return path
+        return self.clip.extract_clip(self.idx["video"], row["start"], row["end"], name, pad=1.5)
+
+    def _ensure_raw_clip(self, row, wait=True):
         if row["raw_clip"]:
             return row["raw_clip"]
-        row["raw_clip"] = self.clip.extract_clip(self.idx["video"], row["start"], row["end"], self._clip_name(row["match_id"], "raw"), pad=1.5)
+        job = self.raw_jobs.get(row["match_id"])
+        if job is None:
+            if wait:
+                row["raw_clip"] = self._build_raw_clip(row)
+                row["clip"] = row["raw_clip"]
+                return row["raw_clip"]
+            self.raw_jobs[row["match_id"]] = self.pool.submit(self._build_raw_clip, dict(row))
+            return None
+        if not wait and not job.done():
+            return None
+        row["raw_clip"] = job.result()
         if not row["clip"]:
             row["clip"] = row["raw_clip"]
         return row["raw_clip"]
 
-    def _segment_row(self, row, query):
-        if row["segmented"]:
-            return row
-        self._ensure_raw_clip(row)
+    def _segment_payload(self, row, query):
+        raw = self._build_raw_clip(row)
         seg_dir = os.path.join(self.run_dir, "segments", f"m_{row['match_id']:02d}")
         os.makedirs(seg_dir, exist_ok=True)
         seg_mp4 = os.path.join(self.run_dir, "clips", f"{self._clip_name(row['match_id'], 'seg')}.mp4")
-        seg_clip, frames, seen = self.seg.segment_clip(row["raw_clip"], query, seg_mp4, seg_dir, stride=3)
-        row["clip"] = seg_clip if seen > 0 else row["raw_clip"]
-        row["frames"] = frames
-        row["segmented"] = bool(seen > 0)
-        if seen == 0 and "no grounded mask, showing raw clip" not in row["summary"]:
+        seg_clip, frames, seen = self.seg.segment_clip(raw, query, seg_mp4, seg_dir, stride=3)
+        return {"raw_clip": raw, "clip": seg_clip if seen > 0 else raw, "frames": frames, "seen": seen}
+
+    def _start_segment(self, row, query):
+        if row["segmented"] or row["match_id"] in self.seg_jobs:
+            return
+        self.seg_jobs[row["match_id"]] = self.pool.submit(self._segment_payload, dict(row), query)
+
+    def _collect_segment(self, row):
+        job = self.seg_jobs.get(row["match_id"])
+        if job is None or not job.done():
+            return False
+        payload = job.result()
+        row["raw_clip"] = payload["raw_clip"]
+        row["clip"] = payload["clip"]
+        row["frames"] = payload["frames"]
+        row["segmented"] = bool(payload["seen"] > 0)
+        if payload["seen"] == 0 and "no grounded mask, showing raw clip" not in row["summary"]:
+            row["summary"] = f"{row['summary']} | no grounded mask, showing raw clip"
+        return True
+
+    def _ensure_segment(self, row, query):
+        if row["segmented"]:
+            return row
+        job = self.seg_jobs.get(row["match_id"])
+        if job is None:
+            payload = self._segment_payload(row, query)
+        else:
+            payload = job.result()
+        row["raw_clip"] = payload["raw_clip"]
+        row["clip"] = payload["clip"]
+        row["frames"] = payload["frames"]
+        row["segmented"] = bool(payload["seen"] > 0)
+        if payload["seen"] == 0 and "no grounded mask, showing raw clip" not in row["summary"]:
             row["summary"] = f"{row['summary']} | no grounded mask, showing raw clip"
         return row
+
+    def _segment_row(self, row, query):
+        return self._ensure_segment(row, query)
 
     def pick_match(self, label, query):
         for x in self.last_hits:
             if x["label"] == label:
-                self._ensure_raw_clip(x)
-                self._segment_row(x, query)
+                self._ensure_raw_clip(x, wait=True)
+                ready = self._collect_segment(x)
+                if not ready:
+                    self._start_segment(x, query)
                 gal = [(fp, x["label"]) for fp in x["frames"]]
                 clip = x["clip"] if x["clip"] else x["raw_clip"]
                 txt = f"### {x['label']}\n\n{x['summary']}"
+                if not ready and not x["frames"]:
+                    txt = f"{txt}\n\nsegmentation is preparing in the background. Open this match again in a few seconds."
                 return clip, gal, txt
         return None, [], ""
 
@@ -266,7 +328,7 @@ class VisionGuardPipeline:
         if not rows:
             return None, None, None
         for row in rows:
-            self._segment_row(row, query)
+            self._ensure_segment(row, query)
         base = datetime.now().strftime("%Y%m%d_%H%M%S")
         js = self.rep.write_json(os.path.join(self.run_dir, "reports", f"selected_{base}.json"), {"hits": rows})
         csv = self.rep.write_csv(os.path.join(self.run_dir, "reports", f"selected_{base}.csv"), rows)
