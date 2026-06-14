@@ -90,6 +90,7 @@ class GroundedSegmenter:
         out = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
         prev = None
         picks = []
+        seen = 0
         i = 0
         while True:
             ok, frame = cap.read()
@@ -100,6 +101,7 @@ class GroundedSegmenter:
                 masks = self.segment(frame, boxes[:2]) if boxes else []
                 prev = self.overlay(frame, boxes[:2], scores[:2], masks)
                 if boxes:
+                    seen += 1
                     p = os.path.join(frame_dir, f"seg_{i:05d}.jpg")
                     cv2.imwrite(p, prev)
                     picks.append(p)
@@ -107,4 +109,4 @@ class GroundedSegmenter:
             i += 1
         cap.release()
         out.release()
-        return out_path, picks
+        return out_path, picks, seen

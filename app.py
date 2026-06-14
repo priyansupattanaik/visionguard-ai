@@ -60,7 +60,7 @@ def export_selected(picks, q, hits):
     return pipe.export_selected(picks)
 
 
-with gr.Blocks(title="VisionGuard AI") as demo:
+with gr.Blocks(title="VisionGuard AI", css=css, theme=gr.themes.Soft(primary_hue="cyan", secondary_hue="slate")) as demo:
     gr.HTML(
         """
 <div class="hero">
@@ -75,7 +75,7 @@ with gr.Blocks(title="VisionGuard AI") as demo:
     with gr.Row():
         with gr.Column(scale=1):
             video = gr.Video(label="cctv video")
-            query = gr.Textbox(label="query", placeholder="person sitting near gate, white car entering, group near entrance")
+            query = gr.Textbox(label="query", placeholder="person sitting near gate, white car entering, fight near road, car accident")
             src = ["assets/asset1.mp4", "assets/asset2.mp4", "assets/asset3.mp4"]
             good = [x for x in src if os.path.exists(x)]
             if good:
@@ -84,7 +84,7 @@ with gr.Blocks(title="VisionGuard AI") as demo:
             status = gr.Markdown("ready")
             live = gr.Image(label="live indexing preview", interactive=False)
             info = gr.Markdown()
-            gr.Markdown("<div class='card'>In Colab, mount Drive before running if you want model downloads to stay cached across sessions.</div>")
+            gr.Markdown("<div class='card'>In Colab, mount Drive once. After that, use git pull in the same folder instead of deleting and cloning the repo again.</div>")
 
         with gr.Column(scale=2):
             table = gr.Dataframe(headers=["rank", "score", "start", "end", "summary", "objects"], interactive=False)
@@ -103,4 +103,4 @@ with gr.Blocks(title="VisionGuard AI") as demo:
 
 if __name__ == "__main__":
     share = bool(os.getenv("COLAB_RELEASE_TAG") or os.getenv("KAGGLE_KERNEL_RUN_TYPE"))
-    demo.launch(server_name="0.0.0.0", share=share, show_error=True, css=css, theme=gr.themes.Soft(primary_hue="cyan", secondary_hue="slate"))
+    demo.launch(server_name="0.0.0.0", share=share, show_error=True)

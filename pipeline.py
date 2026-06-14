@@ -28,6 +28,46 @@ class VisionGuardPipeline:
         self.last_hits = []
         os.makedirs(out_dir, exist_ok=True)
 
+    def _iou(self, a, b):
+        ax1, ay1, ax2, ay2 = a
+        bx1, by1, bx2, by2 = b
+        x1 = max(ax1, bx1)
+        y1 = max(ay1, by1)
+        x2 = min(ax2, bx2)
+        y2 = min(ay2, by2)
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        inter = (x2 - x1) * (y2 - y1)
+        aa = max(1.0, (ax2 - ax1) * (ay2 - ay1))
+        bb = max(1.0, (bx2 - bx1) * (by2 - by1))
+        return inter / (aa + bb - inter)
+
+    def _incident_tags(self, tracks, meta):
+        tags = []
+        people = [t for t in tracks if t["name"] == "person"]
+        veh = [t for t in tracks if t["name"] in ["car", "truck", "bus", "motorcycle", "bicycle"]]
+        if len(people) >= 2 and meta["moving_tracks"] >= 2:
+            for i in range(len(people)):
+                for j in range(i + 1, len(people)):
+                    if self._iou(people[i]["box"], people[j]["box"]) > 0.08:
+                        tags.append("possible fight")
+                        break
+                if "possible fight" in tags:
+                    break
+        if len(veh) >= 2:
+            for i in range(len(veh)):
+                for j in range(i + 1, len(veh)):
+                    if self._iou(veh[i]["box"], veh[j]["box"]) > 0.12:
+                        tags.append("possible collision")
+                        break
+                if "possible collision" in tags:
+                    break
+        if meta["person"] >= 4:
+            tags.append("crowd")
+        if meta["still_people"] >= 1:
+            tags.append("loitering")
+        return sorted(set(tags))
+
     def _new_run(self, video):
         name = os.path.splitext(os.path.basename(video))[0]
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -102,10 +142,11 @@ class VisionGuardPipeline:
                 "still_people": still if objs.get("person", 0) else 0,
                 "person": objs.get("person", 0),
             }
+            tags = self._incident_tags(tracks, meta)
             emb = self.enc.embed_frame(frame)
             frame_path = os.path.join(self.run_dir, "frames", f"f_{i:06d}.jpg")
             cv2.imwrite(frame_path, frame)
-            frames.append({"frame": i, "ts": ts, "emb": emb, "frame_path": frame_path, "meta": meta})
+            frames.append({"frame": i, "ts": ts, "emb": emb, "frame_path": frame_path, "meta": meta, "tags": tags})
             yield {"kind": "preview", "image": self._preview(frame, tracks, ts), "status": f"scanning {ts:.1f}s / {dur:.1f}s"}
             i += 1
         cap.release()
@@ -118,8 +159,10 @@ class VisionGuardPipeline:
             emb = emb / max(np.linalg.norm(emb), 1e-6)
             objs = {}
             tids = set()
+            tags = set()
             for x in chunk:
                 tids |= set(x["meta"]["tracks"])
+                tags |= set(x["tags"])
                 for k, v in x["meta"]["objects"].items():
                     objs[k] = max(objs.get(k, 0), v)
             segs.append({
@@ -130,17 +173,25 @@ class VisionGuardPipeline:
                 "frame_path": item["frame_path"],
                 "objects": sorted(objs.keys()),
                 "tracks": sorted(tids),
+                "tags": sorted(tags),
             })
         self.idx = {"video": video, "meta": {"video": video, "fps": fps, "frames": total, "duration": dur, "sample_sec": sample_sec, "win_sec": win_sec, "segments": len(segs)}, "segments": segs}
         path = os.path.join(self.run_dir, "reports", "index.json")
-        self.rep.write_json(path, {"meta": self.idx["meta"], "segments": [{"start": x["start"], "end": x["end"], "mid": x["mid"], "frame_path": x["frame_path"], "objects": x["objects"]} for x in segs]})
+        self.rep.write_json(path, {"meta": self.idx["meta"], "segments": [{"start": x["start"], "end": x["end"], "mid": x["mid"], "frame_path": x["frame_path"], "objects": x["objects"], "tags": x["tags"]} for x in segs]})
         yield {"kind": "done", "meta": self.idx["meta"], "index_json": path}
 
     def search(self, q, top_k=4):
         qv = self.enc.embed_text(q)
+        ql = q.strip().lower()
         rows = []
         for seg in self.idx["segments"]:
             score = self._cos(qv, seg["emb"])
+            if "fight" in ql and "possible fight" in seg["tags"]:
+                score += 0.35
+            if any(x in ql for x in ["accident", "collision", "crash"]) and "possible collision" in seg["tags"]:
+                score += 0.35
+            if any(x in ql for x in ["incident", "emergency"]) and seg["tags"]:
+                score += 0.2
             rows.append({
                 "query": q,
                 "score": score,
@@ -149,7 +200,8 @@ class VisionGuardPipeline:
                 "frame_path": seg["frame_path"],
                 "objects": seg["objects"],
                 "tracks": seg["tracks"],
-                "summary": ", ".join(seg["objects"]) if seg["objects"] else "no tracked objects",
+                "tags": seg["tags"],
+                "summary": ", ".join(seg["tags"] + seg["objects"]) if (seg["tags"] or seg["objects"]) else "no tracked objects",
             })
         rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         out = []
@@ -168,11 +220,12 @@ class VisionGuardPipeline:
             seg_dir = os.path.join(self.run_dir, "segments", f"m_{i:02d}")
             os.makedirs(seg_dir, exist_ok=True)
             seg_mp4 = os.path.join(self.run_dir, "clips", f"match_{i:02d}_seg.mp4")
-            seg_clip, frames = self.seg.segment_clip(raw, query, seg_mp4, seg_dir, stride=3)
+            seg_clip, frames, seen = self.seg.segment_clip(raw, query, seg_mp4, seg_dir, stride=3)
             row = dict(hit)
             row["raw_clip"] = raw
-            row["clip"] = seg_clip
+            row["clip"] = seg_clip if seen > 0 else raw
             row["frames"] = frames
+            row["segmented"] = bool(seen > 0)
             row["label"] = f"{i}. {hit['start']:.2f}s - {hit['end']:.2f}s"
             out.append(row)
         self.last_hits = out

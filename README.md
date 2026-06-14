@@ -44,7 +44,7 @@ drive.mount('/content/drive')
 ```
 
 Colab will expose a Gradio share link automatically in the notebook output.
-Use a GPU runtime in Colab for the Qwen verification stage.
+Use a GPU runtime in Colab for live grounding and segmentation.
 
 You can also open the ready notebook:
 
@@ -55,6 +55,22 @@ You can also open the ready notebook:
 After pushing the notebook to GitHub, open it with:
 
 `https://colab.research.google.com/github/priyansupattanaik/visionguard-ai/blob/main/VisionGuard_Colab.ipynb`
+
+## Faster Update Flow In Colab
+
+Do not delete the repo folder every time.
+
+```python
+import os
+if not os.path.exists("visionguard-ai"):
+    !git clone https://github.com/priyansupattanaik/visionguard-ai.git
+%cd visionguard-ai
+!git pull
+!pip install -r requirements.txt
+!python app.py
+```
+
+This keeps the repo folder and the Drive-backed model cache, so only your code updates are pulled.
 
 ## Hugging Face Spaces
 
@@ -78,11 +94,13 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 ## Search flow
 
 1. Upload or pick a video.
-2. Index it once.
-3. Enter a natural-language query.
-4. Download the top clips and the timestamp record files.
+2. Enter a natural-language query.
+3. Watch live indexing preview.
+4. Review the matched segmented clips.
+5. Export only the clips and reports you want.
 
 ## Notes
 
 - Mount Drive in Colab before running if you want model downloads cached between sessions.
 - Best experience comes from GPU-backed Colab or GPU-enabled Spaces.
+- Event-like queries such as `car accident`, `collision`, `fight`, or `incident` get extra heuristic boosts from tracked motion and overlap.
