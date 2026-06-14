@@ -152,7 +152,7 @@ class VisionGuardPipeline:
             tag.append("crowd")
         return ", ".join(parts + tag[:2])
 
-    def index_video(self, video, cls=None, sample_sec=1.0, win_sec=6.0, progress=None):
+    def index_video(self, video, cls=None, sample_sec=1.5, win_sec=6.0, progress=None):
         self._new_run(video)
         self.trk.reset()
         cap = cv2.VideoCapture(video)
@@ -248,7 +248,7 @@ class VisionGuardPipeline:
         self.rep.write_json(path, slim)
         return {"run_dir": self.run_dir, "meta": meta, "index_json": path}
 
-    def search(self, q, top_k=6):
+    def search(self, q, top_k=5):
         if not self.idx:
             raise ValueError("index not ready")
         qv = self.enc.embed_text(q)
@@ -271,14 +271,20 @@ class VisionGuardPipeline:
         rows = self._merge_hits(rows[: max(top_k * 3, 12)])
         return rows[:top_k]
 
-    def verify(self, q, hits, clip_pad=2.0, progress=None):
+    def verify(self, q, hits, clip_pad=2.0, max_sec=8.0, progress=None):
         if not self.idx:
             raise ValueError("index not ready")
         out = []
         n = max(len(hits), 1)
         for i, hit in enumerate(hits, 1):
-            clip = self.clip.extract_clip(self.idx["video"], hit["start"], hit["end"], f"qwen_{i:02d}", pad=clip_pad)
-            chk = self.vfy.verify(clip, q, meta=hit["meta_txt"])
+            mid = (hit["start"] + hit["end"]) / 2
+            st = max(hit["start"], mid - (max_sec / 2))
+            ed = min(hit["end"], mid + (max_sec / 2))
+            clip = self.clip.extract_clip(self.idx["video"], st, ed, f"qwen_{i:02d}", pad=clip_pad)
+            try:
+                chk = self.vfy.verify(clip, q, meta=hit["meta_txt"])
+            except Exception:
+                chk = {"match": False, "score": hit["score"], "summary": hit["summary"]}
             row = dict(hit)
             row["clip"] = clip
             row["match"] = chk["match"]
