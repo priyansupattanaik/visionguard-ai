@@ -87,7 +87,10 @@ class GroundedSegmenter:
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-        out = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        tmp = f"{out_path}.part.mp4"
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        out = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
         prev = None
         picks = []
         seen = 0
@@ -112,6 +115,7 @@ class GroundedSegmenter:
             i += 1
         cap.release()
         out.release()
+        os.replace(tmp, out_path)
         if seen == 0 and first is not None:
             p = os.path.join(frame_dir, "fallback_00000.jpg")
             cv2.imwrite(p, first)

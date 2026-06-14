@@ -34,7 +34,10 @@ class ClipGenerator:
         s0 = int(st * fps)
         s1 = int(ed * fps)
         path = os.path.join(self.out_dir, f"{self._safe(name)}_{s0}_{s1}.mp4")
-        out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        tmp = f"{path}.part.mp4"
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        out = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
         cap.set(cv2.CAP_PROP_POS_FRAMES, s0)
         i = s0
         while i <= s1:
@@ -45,4 +48,5 @@ class ClipGenerator:
             i += 1
         cap.release()
         out.release()
+        os.replace(tmp, path)
         return path
