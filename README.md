@@ -9,6 +9,10 @@ pinned: false
 
 Natural-language CCTV search with a scan-first workflow, live indexing preview, matched clip segmentation, per-match export, and timestamp reports.
 
+Full project documentation:
+
+- [PROJECT_DOCUMENTATION.md](/D:/CDAC_PROJECT/CV_Project/PROJECT_DOCUMENTATION.md)
+
 ## Stack
 
 - `ultralytics` `yolo11s.pt` + ByteTrack for live indexing preview and object tracking
