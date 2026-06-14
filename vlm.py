@@ -23,8 +23,17 @@ class SearchEncoder:
             self.m.to(self.dev)
         self.m.eval()
 
+    def _vec(self, x):
+        if hasattr(x, "pooler_output"):
+            x = x.pooler_output
+        elif hasattr(x, "image_embeds"):
+            x = x.image_embeds
+        elif hasattr(x, "text_embeds"):
+            x = x.text_embeds
+        return x
+
     def _norm(self, x):
-        x = x.detach().cpu().numpy()[0]
+        x = self._vec(x).detach().cpu().numpy()[0]
         n = np.linalg.norm(x)
         if n == 0:
             return x.astype(np.float32)
@@ -32,7 +41,8 @@ class SearchEncoder:
 
     def embed_text(self, txt):
         self.load()
-        inp = self.p(text=[txt], return_tensors="pt", padding=True).to(self.dev)
+        txt = f"this is a photo of {txt.strip().lower()}"
+        inp = self.p(text=[txt], return_tensors="pt").to(self.dev)
         with torch.no_grad():
             vec = self.m.get_text_features(**inp)
         return self._norm(vec)
@@ -65,7 +75,7 @@ class QwenVerifier:
         )
         if self.dev != "cuda":
             self.m.to(self.dev)
-        self.p = AutoProcessor.from_pretrained(self.model_name)
+        self.p = AutoProcessor.from_pretrained(self.model_name, min_pixels=256 * 28 * 28, max_pixels=640 * 28 * 28)
 
     def _pick(self, txt):
         a = txt.find("{")

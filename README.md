@@ -41,6 +41,7 @@ python app.py
 ```
 
 Colab will expose a Gradio share link automatically in the notebook output.
+Use a GPU runtime in Colab for the Qwen verification stage.
 
 You can also open the ready notebook:
 
