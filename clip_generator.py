@@ -1,5 +1,7 @@
 import os
 import re
+import shutil
+import subprocess
 import cv2
 
 
@@ -48,5 +50,35 @@ class ClipGenerator:
             i += 1
         cap.release()
         out.release()
-        os.replace(tmp, path)
+        self._finalize_video(tmp, path)
         return path
+
+    def _finalize_video(self, tmp, path):
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            conv = f"{path}.conv.mp4"
+            if os.path.exists(conv):
+                os.remove(conv)
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-i",
+                tmp,
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-an",
+                conv,
+            ]
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                os.replace(conv, path)
+                os.remove(tmp)
+                return
+            except Exception:
+                if os.path.exists(conv):
+                    os.remove(conv)
+        os.replace(tmp, path)

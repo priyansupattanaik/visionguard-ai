@@ -1,4 +1,6 @@
 import os
+import shutil
+import subprocess
 
 import cv2
 import numpy as np
@@ -115,9 +117,39 @@ class GroundedSegmenter:
             i += 1
         cap.release()
         out.release()
-        os.replace(tmp, out_path)
+        self._finalize_video(tmp, out_path)
         if seen == 0 and first is not None:
             p = os.path.join(frame_dir, "fallback_00000.jpg")
             cv2.imwrite(p, first)
             picks.append(p)
         return out_path, picks, seen
+
+    def _finalize_video(self, tmp, out_path):
+        ffmpeg = shutil.which("ffmpeg")
+        if ffmpeg:
+            conv = f"{out_path}.conv.mp4"
+            if os.path.exists(conv):
+                os.remove(conv)
+            cmd = [
+                ffmpeg,
+                "-y",
+                "-i",
+                tmp,
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "+faststart",
+                "-an",
+                conv,
+            ]
+            try:
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                os.replace(conv, out_path)
+                os.remove(tmp)
+                return
+            except Exception:
+                if os.path.exists(conv):
+                    os.remove(conv)
+        os.replace(tmp, out_path)

@@ -1,4 +1,5 @@
 import os
+import warnings
 
 import gradio as gr
 
@@ -6,6 +7,7 @@ from cache_utils import setup_cache
 from pipeline import VisionGuardPipeline
 
 setup_cache()
+warnings.filterwarnings("ignore", message="The parameters have been moved from the Blocks constructor to the launch\\(\\) method in Gradio 6\\.0: theme, css.*")
 pipe = VisionGuardPipeline()
 css = """
 .gradio-container{max-width:1240px!important}
