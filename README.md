@@ -7,22 +7,23 @@ pinned: false
 
 # VisionGuard AI
 
-Natural-language CCTV search with fast retrieval, Qwen2.5-VL-7B verification, matched clip export, and timestamp records.
+Natural-language CCTV search with live indexing preview, matched clip segmentation, per-match export, and timestamp reports.
 
 ## Stack
 
-- `ultralytics` YOLO + ByteTrack for object tracking
-- `transformers` SigLIP2 for fast retrieval
-- `transformers` Qwen2.5-VL-7B-Instruct for top-k verification
+- `ultralytics` YOLO + ByteTrack for live indexing preview
+- `transformers` SigLIP2 for retrieval
+- `transformers` Grounding DINO for query grounding
+- `transformers` SAM2 for matched clip segmentation
 - `gradio` for the UI
 - OpenCV for video read/write
 
 ## What changed
 
-- Removed the old placeholder search path
-- Added Qwen2.5-VL-7B verification on the top candidate clips
-- Added multi-clip export, CSV/JSON/HTML reports, and zip download
-- Kept indexing fast enough for Colab while using a stronger verifier
+- Added live indexing preview during scan
+- Added Grounding DINO + SAM2 segmentation on matched clips
+- Added per-match export with CSV/JSON/HTML/ZIP outputs
+- Reduced repeated downloads by supporting Drive-backed cache in Colab
 
 ## Local run
 
@@ -36,6 +37,8 @@ python app.py
 ```python
 !git clone https://github.com/priyansupattanaik/visionguard-ai.git
 %cd visionguard-ai
+from google.colab import drive
+drive.mount('/content/drive')
 !pip install -r requirements.txt
 !python app.py
 ```
@@ -68,8 +71,8 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 
 ### Notes
 
-- CPU Spaces will work but will be slow for long videos.
-- Qwen2.5-VL-7B verification is practical on GPU Spaces, not ideal on free CPU Spaces.
+- CPU Spaces will work but will be slow for segmentation.
+- GPU Spaces are strongly recommended for Grounding DINO + SAM2.
 - If you want tighter version control, add `sdk_version` in the YAML block at the top of this file.
 
 ## Search flow
@@ -81,6 +84,5 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 
 ## Notes
 
-- Default tracking focus can be `all`, `person`, or `vehicle`.
-- For long videos, increase `sample every (sec)` to speed up indexing.
-- Best accuracy comes from GPU-backed Colab or GPU-enabled Spaces because Qwen2.5-VL-7B is used in the verification stage.
+- Mount Drive in Colab before running if you want model downloads cached between sessions.
+- Best experience comes from GPU-backed Colab or GPU-enabled Spaces.

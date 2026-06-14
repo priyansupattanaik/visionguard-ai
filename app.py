@@ -2,93 +2,105 @@ import os
 
 import gradio as gr
 
+from cache_utils import setup_cache
 from pipeline import VisionGuardPipeline
 
-
+setup_cache()
 pipe = VisionGuardPipeline()
 css = """
-.gradio-container{max-width:1280px!important}
-.hero{padding:20px 24px;border-radius:20px;background:linear-gradient(135deg,#12344d 0%,#1e6f86 55%,#7cc4b8 100%);color:#fff;margin-bottom:18px}
-.hero h1{margin:0 0 8px 0;font-size:34px}
-.hero p{margin:0;font-size:15px;opacity:.95}
-.cardnote{padding:10px 14px;border:1px solid #d9e5ec;border-radius:14px;background:#f7fbfd}
-.status{padding:12px 14px;border-radius:14px;background:#eef6fa;border:1px solid #d4e5ef}
+.gradio-container{max-width:1180px!important}
+.hero{padding:22px 24px;border-radius:22px;background:linear-gradient(135deg,#16364a 0%,#1f6d78 60%,#b7d9c8 100%);color:#fff;margin-bottom:16px}
+.hero h1{margin:0 0 6px 0;font-size:34px}
+.hero p{margin:0;font-size:15px;opacity:.96}
+.card{padding:12px 14px;border:1px solid #d7e4ea;border-radius:14px;background:#f7fbfd}
 """
 
 
-def _fmt_meta(meta):
+def _meta(meta):
     return (
         f"video: `{os.path.basename(meta['video'])}`\n\n"
         f"- duration: `{meta['duration']:.2f}s`\n"
         f"- fps: `{meta['fps']:.2f}`\n"
         f"- sampled every: `{meta['sample_sec']:.2f}s`\n"
-        f"- search windows: `{meta['segments']}`"
+        f"- indexed windows: `{meta['segments']}`"
     )
 
 
-def run_all(video, q, progress=gr.Progress()):
+def scan(video, q):
     if not video:
-        return "upload a video first", "", [], None, None, None, None
+        yield "upload a video first", None, "", [], None, None, gr.update(choices=[], value=[]), None, None, []
+        return
     if not q or not q.strip():
-        return "enter a natural-language query", "", [], None, None, None, None
-    progress(0.01, desc="indexing video")
-    res = pipe.index_video(video, cls=None, sample_sec=1.5, win_sec=6.0, progress=progress)
-    progress(0.99, desc="ranking matches")
-    hits = pipe.search(q.strip(), top_k=5)
-    hits = pipe.verify(q.strip(), hits[:3], clip_pad=2.0, max_sec=8.0, progress=progress)
-    hits = hits[:5]
-    exp = pipe.export_hits(q.strip(), hits)
-    rows = []
-    md = [f"## matches for `{q}`", ""]
+        yield "enter a natural-language query", None, "", [], None, None, gr.update(choices=[], value=[]), None, None, []
+        return
+    yield "starting scan", None, "", [], None, None, gr.update(choices=[], value=[]), None, None, []
+    meta = None
+    for ev in pipe.index_video_iter(video):
+        if ev["kind"] == "preview":
+            yield ev["status"], ev["image"], "", [], None, None, gr.update(choices=[], value=[]), None, None, []
+        else:
+            meta = ev["meta"]
+    hits = pipe.search(q.strip(), top_k=4)
+    seg = pipe.segment_hits(hits, q.strip())
+    rows = [[i, round(x["score"], 4), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])] for i, x in enumerate(seg, 1)]
     gal = []
-    if not exp["hits"]:
-        md.append("no strong matches found")
-    for i, x in enumerate(exp["hits"], 1):
-        rows.append([i, round(x["qwen_score"], 4), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])])
-        md.append(f"{i}. `{x['start']:.2f}s - {x['end']:.2f}s` score `{x['qwen_score']:.4f}`  ")
-        md.append(f"   {x['summary']}")
-        gal.append((x["frame_path"], f"{i}. {x['start']:.2f}s - {x['end']:.2f}s"))
-    first = exp["hits"][0]["clip"] if exp["hits"] else None
-    clips = [x["clip"] for x in exp["hits"]]
-    files = [exp["html"], exp["csv"], exp["json"], exp["zip"]]
-    status = "<div class='status'>scan complete</div>"
-    return status, _fmt_meta(res["meta"]), rows, first, clips, files, gal if gal else None
+    for x in seg:
+        for fp in x["frames"][:3]:
+            gal.append((fp, x["label"]))
+    choices = [x["label"] for x in seg]
+    first = seg[0]["clip"] if seg else None
+    all_clips = [x["clip"] for x in seg] + [x["raw_clip"] for x in seg]
+    yield "scan complete", None, _meta(meta), rows, first, all_clips, gr.update(choices=choices, value=choices[:1]), gal, q.strip(), seg
 
 
-with gr.Blocks(title="VisionGuard AI", theme=gr.themes.Soft(primary_hue="cyan", secondary_hue="slate"), css=css) as demo:
+def export_selected(picks, q, hits):
+    if not hits or not picks:
+        return None, None, None
+    pipe.last_hits = hits
+    return pipe.export_selected(picks)
+
+
+with gr.Blocks(title="VisionGuard AI") as demo:
     gr.HTML(
         """
 <div class="hero">
   <h1>VisionGuard AI</h1>
-  <p>Upload a video, write a query, scan the footage, then review separate matched clips and export the ones you need.</p>
+  <p>Upload a video, type a query, watch indexing live, review each matched segmented clip, and export only the clips you want.</p>
 </div>
 """
     )
+    q_state = gr.State("")
+    hits_state = gr.State([])
 
     with gr.Row():
         with gr.Column(scale=1):
             video = gr.Video(label="cctv video")
-            q = gr.Textbox(placeholder="person sitting near gate, white car entering, group at entrance")
+            query = gr.Textbox(label="query", placeholder="person sitting near gate, white car entering, group near entrance")
             src = ["assets/asset1.mp4", "assets/asset2.mp4", "assets/asset3.mp4"]
             good = [x for x in src if os.path.exists(x)]
             if good:
                 gr.Examples(good, inputs=video, label="sample videos")
             scan_btn = gr.Button("scan video", variant="primary")
-            out_status = gr.HTML("<div class='status'>ready</div>")
-            meta_md = gr.Markdown()
-            gr.Markdown("<div class='cardnote'>The app uses broad retrieval first and verifies only the top few candidate clips to keep Colab usable.</div>")
+            status = gr.Markdown("ready")
+            live = gr.Image(label="live indexing preview", interactive=False)
+            info = gr.Markdown()
+            gr.Markdown("<div class='card'>In Colab, mount Drive before running if you want model downloads to stay cached across sessions.</div>")
 
         with gr.Column(scale=2):
-            out_md = gr.Markdown()
-            out_tbl = gr.Dataframe(headers=["rank", "score", "start", "end", "summary", "objects"], interactive=False, visible=False)
-            out_vid = gr.Video(label="top clip")
-            out_clips = gr.Files(label="all clips")
-            out_files = gr.Files(label="reports")
-            out_gallery = gr.Gallery(label="matched keyframes", columns=3, height="auto")
+            table = gr.Dataframe(headers=["rank", "score", "start", "end", "summary", "objects"], interactive=False)
+            clip = gr.Video(label="segmented top clip")
+            clips = gr.Files(label="all matched clips")
+            pick = gr.CheckboxGroup(label="choose clips to export")
+            export_btn = gr.Button("export selected")
+            zipf = gr.File(label="zip")
+            html = gr.File(label="html report")
+            csv = gr.File(label="csv report")
+            gallery = gr.Gallery(label="segmented preview frames", columns=3, height="auto")
 
-    scan_btn.click(run_all, [video, q], [out_status, meta_md, out_tbl, out_vid, out_clips, out_files, out_gallery])
+    scan_btn.click(scan, [video, query], [status, live, info, table, clip, clips, pick, gallery, q_state, hits_state])
+    export_btn.click(export_selected, [pick, q_state, hits_state], [zipf, html, csv])
 
 
 if __name__ == "__main__":
     share = bool(os.getenv("COLAB_RELEASE_TAG") or os.getenv("KAGGLE_KERNEL_RUN_TYPE"))
-    demo.queue().launch(server_name="0.0.0.0", share=share, show_error=True)
+    demo.launch(server_name="0.0.0.0", share=share, show_error=True, css=css, theme=gr.themes.Soft(primary_hue="cyan", secondary_hue="slate"))

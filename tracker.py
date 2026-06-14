@@ -1,10 +1,11 @@
 import os
 
 import torch
-from ultralytics import YOLO
 
 os.environ.setdefault("YOLO_CONFIG_DIR", os.path.join(os.getcwd(), ".yolo"))
 os.makedirs(os.environ["YOLO_CONFIG_DIR"], exist_ok=True)
+
+from ultralytics import YOLO
 
 
 class ObjectTracker:
