@@ -38,7 +38,7 @@ The current app flow is:
 
 1. Upload or choose a video.
 2. Click `step 1: scan video`.
-3. The system samples the video, tracks objects, builds retrieval embeddings, and computes event tags.
+3. The system samples the video, tracks objects, and builds retrieval embeddings.
 4. After scan completes, enter a natural-language query.
 5. Click `step 2: find matches`.
 6. The system searches indexed windows and returns top time ranges.
@@ -66,7 +66,7 @@ Current main files:
 - [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:1): end-to-end video indexing, search, background clip prep, export
 - [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1): YOLO + ByteTrack object tracking
 - [vlm.py](/D:/CDAC_PROJECT/CV_Project/vlm.py:1): text-frame embedding search
-- [events.py](/D:/CDAC_PROJECT/CV_Project/events.py:1): pretrained event tagger
+- [vector_index.py](/D:/CDAC_PROJECT/CV_Project/vector_index.py:1): `turbovec`-backed segment vector index with NumPy fallback
 - [locate_anything.py](/D:/CDAC_PROJECT/CV_Project/locate_anything.py:1): NVIDIA LocateAnything wrapper
 - [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1): LocateAnything grounding + SAM2 segmentation + segmented clip render
 - [clip_generator.py](/D:/CDAC_PROJECT/CV_Project/clip_generator.py:1): clip extraction and browser-ready finalize
@@ -140,7 +140,6 @@ The vision analysis layer is split across:
 
 - [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1)
 - [vlm.py](/D:/CDAC_PROJECT/CV_Project/vlm.py:1)
-- [events.py](/D:/CDAC_PROJECT/CV_Project/events.py:1)
 - [locate_anything.py](/D:/CDAC_PROJECT/CV_Project/locate_anything.py:1)
 - [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1)
 
@@ -153,7 +152,8 @@ This is conceptually inside [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.p
 It uses:
 
 - SigLIP2 embedding similarity
-- event-tag boosts
+- `turbovec` `IdMapIndex` for the primary dense vector lookup
+- query-object overlap boosts
 - deduplication of near-identical windows
 
 This layer turns indexed windows into ranked matches.
@@ -245,9 +245,8 @@ For each sampled frame:
 2. Object counts and ids are collected.
 3. A live preview overlay is drawn.
 4. SigLIP2 creates a frame embedding.
-5. A thumbnail is created for event tagging.
-6. The raw frame is saved to `output/.../frames`.
-7. A preview event is yielded back to Gradio.
+5. The raw frame is saved to `output/.../frames`.
+6. A preview event is yielded back to Gradio.
 
 That yield behavior is important.
 
@@ -257,13 +256,12 @@ It means the backend is streaming progress to the UI while scanning, not waiting
 
 After all sampled frames are collected:
 
-1. X-CLIP scores event labels on chunks of sampled thumbnails.
-2. Nearby sampled frames are grouped into windows.
-3. Window embeddings are averaged.
-4. Object names and track ids are aggregated.
-5. Event tags are attached to each window.
-6. The final search index is stored in memory in `self.idx`.
-7. A JSON index report is also written to disk.
+1. Nearby sampled frames are grouped into windows.
+2. Window embeddings are averaged.
+3. Object names and track ids are aggregated.
+4. The final search index is stored in memory in `self.idx`.
+5. A `turbovec` segment index is also written to disk.
+6. A JSON index report is also written to disk.
 
 At this point the video is searchable.
 
@@ -279,6 +277,7 @@ It contains:
 
 Each indexed window stores:
 
+- stable segment id
 - start time
 - end time
 - midpoint
@@ -286,7 +285,6 @@ Each indexed window stores:
 - representative frame path
 - object names
 - track ids
-- event tags
 
 This in-memory index is the reason repeated queries are possible without rescanning.
 
@@ -297,9 +295,9 @@ When the user clicks `step 2: find matches`:
 1. `app.py` calls `find_query(q)`.
 2. `find_query(q)` calls `pipe.search(q, top_k=4)`.
 3. The query is embedded with SigLIP2.
-4. Cosine similarity is computed against every indexed window.
-5. Event-tag overlap adds a small score boost.
-6. Top windows are sorted.
+4. `turbovec` searches the persisted segment embedding index.
+5. Query-object overlap adds a small boost or penalty.
+6. The candidate list is reranked.
 7. Nearby duplicate windows are filtered.
 
 This stage is search only.
@@ -407,7 +405,7 @@ The backend therefore treats export as a finalization stage.
 
 Conceptual backend data flow:
 
-`video path -> sampled frames -> tracking/meta -> embeddings -> event tags -> indexed windows -> query embedding -> ranked hits -> raw clips -> grounded boxes -> masks -> exports`
+`video path -> sampled frames -> tracking/meta -> embeddings -> indexed windows -> query embedding -> ranked hits -> raw clips -> grounded boxes -> masks -> exports`
 
 This is the shortest accurate summary of the backend processing chain.
 
@@ -478,6 +476,7 @@ Each sampled frame is converted into an embedding with SigLIP2 in [vlm.py](/D:/C
 Current retrieval model:
 
 - `google/siglip2-base-patch16-224`
+- `turbovec` stores and searches the resulting window vectors
 
 Why used:
 
@@ -491,39 +490,7 @@ How it works:
 - query -> text embedding
 - cosine similarity between query and indexed windows
 
-### 6.5 Event Tagging
-
-The project also computes event-like tags during indexing with X-CLIP in [events.py](/D:/CDAC_PROJECT/CV_Project/events.py:6).
-
-Current event model:
-
-- `microsoft/xclip-base-patch32`
-
-Current label set:
-
-- `a person sitting`
-- `a person standing`
-- `a person walking`
-- `a person running`
-- `people fighting`
-- `a person falling`
-- `a traffic collision`
-- `vehicles moving in traffic`
-- `a crowd gathering`
-- `a person loitering`
-
-Why used:
-
-- gives pretrained video-level event priors
-- better than the old overlap-and-motion heuristics for semantic event tags
-- adds event-aware bias to retrieval
-
-Important limitation:
-
-- this is still approximate event tagging, not a guaranteed CCTV incident classifier
-- event labels are computed on sampled frame chunks, not full dense motion graphs
-
-### 6.6 Window Indexing
+### 6.5 Window Indexing
 
 After frame sampling, the project groups neighboring sampled frames into windows in [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:147).
 
@@ -536,17 +503,16 @@ For each window it stores:
 - representative frame path
 - detected object names
 - tracked ids
-- event tags
 
 This becomes the searchable video index.
 
-### 6.7 Query Search
+### 6.6 Query Search
 
 When the user enters a query:
 
 1. The query text is embedded with SigLIP2.
-2. Each indexed window is scored by cosine similarity.
-3. Matching event tags add a small score boost.
+2. `turbovec` returns the top candidate windows by vector similarity.
+3. Query-object overlap adjusts the score.
 4. Top windows are returned.
 
 Search code is in [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:179).
@@ -556,8 +522,9 @@ Why this design:
 - keeps search fast after indexing
 - supports multiple queries on one scanned video
 - avoids rerunning full video analysis for every query
+- reduces obvious false-positive labels when the detected objects do not support the query
 
-### 6.8 Clip Preparation
+### 6.7 Clip Preparation
 
 The project does not trim every clip synchronously during search anymore.
 
@@ -575,7 +542,7 @@ Why:
 - lets the user start watching earlier
 - avoids blocking the UI on full post-processing
 
-### 6.9 Localization and Segmentation
+### 6.8 Localization and Segmentation
 
 Matched clips use a layered localization design in [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:12):
 
@@ -593,7 +560,7 @@ Important limitation:
 - LocateAnything improves localization, not temporal event recognition
 - SAM2 segments what is localized, but does not understand whether a collision or fight really happened
 
-### 6.10 Export
+### 6.9 Export
 
 The project can export:
 
@@ -707,23 +674,31 @@ Why SigLIP2:
 - lighter than large VLM rerankers
 - practical for indexing many windows
 
-### 7.6 X-CLIP
+### 7.6 turbovec
 
 Used for:
 
-- event-like video tag scoring during indexing
+- indexing segment embeddings after scan
+- fast top-k vector retrieval during search
+- writing a reusable `.tvim` vector index for each scan
+
+Why chosen:
+
+- purpose-built Python vector index
+- supports stable external ids through `IdMapIndex`
+- lower search overhead than rescoring every segment in Python
 
 Alternatives:
 
-- VideoMAE classification
-- TimeSformer-based action models
-- SlowFast
+- plain NumPy cosine search
+- FAISS
+- LanceDB
 
-Why X-CLIP:
+Why it fits this repo:
 
-- already aligned with text-video similarity
-- easy label-set customization
-- suitable for event priors from sampled windows
+- the pipeline already creates one embedding per searchable segment
+- segment ids need to stay stable across retrieval and export
+- it improves query latency without changing the grounding stage
 
 ### 7.7 LocateAnything-3B
 
@@ -780,7 +755,7 @@ Current defaults from code:
 
 - tracker: `yolo11s.pt`
 - retrieval: `google/siglip2-base-patch16-224`
-- event tagging: `microsoft/xclip-base-patch32`
+- vector retriever: `turbovec` `IdMapIndex`
 - grounding primary: `nvidia/LocateAnything-3B`
 - segmentation: `facebook/sam2.1-hiera-small`
 
@@ -809,6 +784,7 @@ This is the main optimization concept of the project.
 - scan-first indexing
 - frame sampling instead of full semantic embedding on every frame
 - averaged window embeddings
+- `turbovec` top-k vector retrieval instead of full Python rescoring over every segment
 - background clip trimming
 - background segmentation start for the first result
 - atomic clip writes to avoid broken partially-written MP4s
@@ -820,7 +796,7 @@ This is the main optimization concept of the project.
 - natural-language search over one scanned video
 - repeated queries after one scan
 - object-aware retrieval
-- event-biased retrieval for a fixed label family
+- representative-frame retrieval for top matches
 - localization and segmentation on matched clips
 - selective export
 - Colab demo workflow
@@ -846,8 +822,8 @@ These are temporal events.
 The current pipeline improves retrieval and localization, but event correctness can still fail because:
 
 - sampling may miss fine-grained motion
-- X-CLIP tags are approximate
 - grounding localizes objects, not event truth
+- the runtime avoids injecting event labels by default because those labels produced false positives
 
 ### 13.2 Query Quality Depends on Prompt Style
 
@@ -857,7 +833,7 @@ Better:
 
 - `white car near gate`
 - `person sitting by wall`
-- `crowd gathering near road`
+- `person near road`
 
 Worse:
 
@@ -871,7 +847,7 @@ Even with optimization, very long videos still require:
 - reading frames
 - tracking
 - embedding
-- event tagging
+- retrieval scoring
 
 The project is more scalable than before, but not unbounded.
 
@@ -988,19 +964,6 @@ In this project, indexing stores:
 - frame paths
 - embeddings
 - object names
-- event tags
-
-### Event Tagging
-
-Event tagging means assigning likely behavior or action labels to a video window.
-
-Examples:
-
-- `people fighting`
-- `a person falling`
-- `a crowd gathering`
-
-This is not guaranteed truth. It is a model prediction.
 
 ### Scan-First
 
@@ -1030,21 +993,7 @@ Why it does not solve everything:
 - it localizes regions in frames
 - it does not by itself recognize temporal events like collisions across time
 
-### 14B.2 X-CLIP
-
-Officially, X-CLIP is a general video-language understanding model trained on Kinetics-400.
-
-Why it stays in the project:
-
-- it supports text-video similarity
-- it fits fixed event-label scoring from sampled windows
-
-Why it is limited:
-
-- it is not specialized for CCTV incidents
-- it is not guaranteed to distinguish collision vs near-collision reliably
-
-### 14B.3 VideoMAE and TimeSformer
+### 14B.2 VideoMAE and TimeSformer
 
 Officially, VideoMAE and TimeSformer are pretrained video-classification models in Transformers.
 
@@ -1146,10 +1095,10 @@ A: It pays the analysis cost once and allows repeated queries cheaply afterward.
 ### 18.2 Architecture
 
 Q: What are the major stages of the pipeline?  
-A: Video scan, frame sampling, tracking, retrieval embedding, event tagging, window indexing, query search, clip prep, grounding, segmentation, export.
+A: Video scan, frame sampling, tracking, retrieval embedding, window indexing, query search, clip prep, grounding, segmentation, export.
 
 Q: Why use multiple models instead of one large model?  
-A: Each part solves a different subproblem more efficiently: tracking, retrieval, event tagging, grounding, segmentation.
+A: Each part solves a different subproblem more efficiently: tracking, retrieval, grounding, segmentation.
 
 Q: Why not process every frame densely?  
 A: It is too expensive for Colab and would make indexing much slower.
@@ -1161,9 +1110,6 @@ A: Fast object detection and useful live preview overlays.
 
 Q: Why use SigLIP2?  
 A: It provides text-image retrieval embeddings for semantic search.
-
-Q: Why use X-CLIP?  
-A: It provides pretrained event-like video tags for windows.
 
 Q: Why use LocateAnything-3B?  
 A: It improves open-vocabulary grounding on matched frames from natural-language phrases.
@@ -1180,7 +1126,7 @@ Q: Is the system 100 percent accurate?
 A: No. It is a practical retrieval-and-localization system, not a guaranteed perfect forensic system.
 
 Q: Why can collision detection still fail?  
-A: Collision is a temporal event. Localization alone is not enough, and event tags are still approximate.
+A: Collision is a temporal event. Localization alone is not enough, and the current runtime does not claim reliable event truth from object boxes alone.
 
 Q: Does the system hallucinate?  
 A: It can produce incorrect retrievals or weak event matches. No honest open-world system can promise zero hallucination.
@@ -1226,7 +1172,7 @@ If the project were redesigned, possible substitutions include:
   - CLIP
   - EVA-CLIP
   - larger VLM reranker
-- event tagging:
+- event models:
   - VideoMAE
   - TimeSformer
   - dedicated action-recognition model
@@ -1271,7 +1217,6 @@ Best use of LangChain in this project:
 - store per-window metadata
 - store timestamps
 - store object tags
-- store event tags
 - store generated summaries
 - query those records using natural language
 - call the vision stack only for top candidates
@@ -1347,7 +1292,6 @@ Convert sampled windows into searchable units with:
 
 - frame embeddings
 - object tags
-- event tags
 - representative frames
 
 ### Stage 3. Natural-language search
@@ -1355,7 +1299,6 @@ Convert sampled windows into searchable units with:
 Convert the query into a text embedding and rank indexed windows by:
 
 - semantic similarity
-- event-label overlap
 - object presence clues
 
 ### Stage 4. Candidate refinement
@@ -1433,7 +1376,7 @@ This project is best understood as a layered surveillance search system:
 
 - YOLO + ByteTrack answers: what objects are present
 - SigLIP2 answers: which windows are semantically similar to the query
-- X-CLIP answers: which windows look like certain event categories
+- turbovec answers: which indexed segment embeddings should be searched first
 - LocateAnything answers: where is the queried thing in the matched frame
 - SAM2 answers: what exact region should be highlighted
 - Clip/report generation answers: how to deliver the result to the user

@@ -17,8 +17,8 @@ Full project documentation:
 
 - `ultralytics` `yolo11s.pt` + ByteTrack for live indexing preview and object tracking
 - `transformers` `google/siglip2-base-patch16-224` for text-frame retrieval
-- `transformers` `microsoft/xclip-base-patch32` for pretrained event tagging on indexed windows
-- `transformers` `IDEA-Research/grounding-dino-base` for query grounding
+- `turbovec` `IdMapIndex` for persisted segment embedding search
+- `transformers` `nvidia/LocateAnything-3B` for query grounding on matched clips
 - `transformers` `facebook/sam2.1-hiera-small` for matched clip segmentation
 - `gradio` for the UI
 - OpenCV for video read/write
@@ -27,10 +27,11 @@ Full project documentation:
 
 - Added live indexing preview during scan
 - Added LocateAnything + SAM2 segmentation on matched clips
+- Added `turbovec` as the primary segment retriever with NumPy fallback
 - Added per-match export with CSV/JSON/HTML/ZIP outputs
 - Reduced repeated downloads by supporting Drive-backed cache in Colab
 - Removed clip extraction from the initial query path so search returns timestamps first and generates clips only when you open or export a match
-- Replaced overlap/motion incident heuristics with pretrained X-CLIP event tagging
+- Removed noisy event-tag injection from runtime search to reduce false positives
 
 ## Local run
 
@@ -116,5 +117,6 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 
 - Mount Drive in Colab before running if you want model downloads cached between sessions.
 - Best experience comes from GPU-backed Colab or GPU-enabled Spaces.
-- Event-like queries such as `car accident`, `collision`, `fight`, or `incident` are boosted by pretrained X-CLIP event tags computed during indexing.
-- The UI now also writes a short answer block below the query with timestamps and what was detected in each returned match.
+- Search now favors semantic retrieval plus detected-object overlap from the query, which is less noisy than the earlier event-tag path.
+- Segment embeddings are persisted to a local `turbovec` index per scan, so repeated queries use the vector index instead of rescoring every segment in Python.
+- The UI writes a short answer block below the query and shows representative matched frames immediately.
