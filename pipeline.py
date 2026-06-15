@@ -8,6 +8,7 @@ import numpy as np
 
 from cache_utils import setup_cache
 from clip_generator import ClipGenerator
+from florence import FlorenceVerifier
 from report_generator import ReportGenerator
 from segmenter import GroundedSegmenter
 from tracker import ObjectTracker
@@ -18,10 +19,11 @@ setup_cache()
 
 
 class VisionGuardPipeline:
-    def __init__(self, out_dir="output", yolo="yolo11s.pt", clip_model="google/siglip2-base-patch16-224", locate_model="nvidia/LocateAnything-3B", sam="facebook/sam2.1-hiera-small"):
+    def __init__(self, out_dir="output", yolo="yolo11s.pt", clip_model="google/siglip2-base-patch16-224", florence_model="microsoft/Florence-2-base", locate_model="nvidia/LocateAnything-3B", sam="facebook/sam2.1-hiera-small"):
         self.out_dir = out_dir
         self.trk = ObjectTracker(model=yolo)
         self.enc = SearchEncoder(model=clip_model)
+        self.ver = FlorenceVerifier(model=florence_model)
         self.seg = GroundedSegmenter(sam=sam, locate_model=locate_model)
         self.idx = None
         self.run_dir = None
@@ -160,6 +162,25 @@ class VisionGuardPipeline:
     def _frame_summary(self, q, peak_ts, objs):
         label = ", ".join(objs) if objs else "no tracked objects"
         return f"best matching sampled frame at {peak_ts:.2f}s | detected: {label}"
+
+    def _verify_rows(self, rows, query, top_n=6):
+        if not rows:
+            return rows
+        q_text_vec = self.enc.embed_text(query)
+        take = min(top_n, len(rows))
+        for i in range(take):
+            caption = self.ver.caption_path(rows[i]["frame_path"])
+            rows[i]["verified_caption"] = caption
+            if not caption:
+                rows[i]["verify_score"] = 0.0
+                continue
+            c_vec = self.enc.embed_text(caption)
+            vscore = self._cos(q_text_vec, c_vec)
+            rows[i]["verify_score"] = float(vscore)
+            rows[i]["score"] = float(rows[i]["score"] * 0.75 + max(vscore, 0.0) * 0.25)
+            rows[i]["summary"] = f"best matching sampled frame at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {caption}"
+        rows = sorted(rows, key=lambda x: x["score"], reverse=True)
+        return rows
 
     def _cluster_frame_hits(self, rows, top_k, gap_sec):
         rows = sorted(rows, key=lambda x: x["ts"])
@@ -322,6 +343,7 @@ class VisionGuardPipeline:
                     **self.idx["meta"],
                     "retriever": self.frame_idx.backend,
                     "segment_retriever": self.search_idx.backend,
+                    "verifier": self.ver.model_name,
                 },
                 "frames": [
                     {
@@ -348,11 +370,12 @@ class VisionGuardPipeline:
         )
         yield {
             "kind": "done",
-            "meta": {
-                **self.idx["meta"],
-                "retriever": self.frame_idx.backend,
-                "segment_retriever": self.search_idx.backend,
-            },
+                "meta": {
+                    **self.idx["meta"],
+                    "retriever": self.frame_idx.backend,
+                    "segment_retriever": self.search_idx.backend,
+                    "verifier": self.ver.model_name,
+                },
             "index_json": path,
         }
 
@@ -393,7 +416,7 @@ class VisionGuardPipeline:
         rows = [x for x in sorted(rows, key=lambda x: x["score"], reverse=True) if x["score"] >= 0.16]
         out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
         if out:
-            return out
+            return self._verify_rows(out, q, top_n=max(top_k * 2, 4))[:top_k]
         n = len(self.idx["segments"])
         if n == 0:
             return []
@@ -440,7 +463,7 @@ class VisionGuardPipeline:
             if row["score"] < 0.18:
                 continue
             out.append(row)
-        return out
+        return self._verify_rows(out, q, top_n=max(top_k * 2, 4))[:top_k]
 
     def prepare_hits(self, hits, query):
         out = []

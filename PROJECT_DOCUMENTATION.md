@@ -9,7 +9,7 @@ The goal is:
 - scan a CCTV or general surveillance-style video
 - index the video once
 - ask a natural-language query after scanning
-- return the most relevant time windows
+- return the most relevant timestamps, frames, and clip windows
 - show the matched clip
 - localize the queried object or region in matched clips
 - generate exportable clips and reports
@@ -41,7 +41,7 @@ The current app flow is:
 3. The system samples the video, tracks objects, and builds retrieval embeddings.
 4. After scan completes, enter a natural-language query.
 5. Click `step 2: find matches`.
-6. The system searches indexed windows and returns top time ranges.
+6. The system searches indexed sampled frames, clusters them into clip candidates, verifies the top candidates, and returns top time ranges.
 7. The first clip is prepared immediately.
 8. Other clips trim in the background.
 9. When a match is opened, localization and segmentation are prepared for that clip.
@@ -66,7 +66,8 @@ Current main files:
 - [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:1): end-to-end video indexing, search, background clip prep, export
 - [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1): YOLO + ByteTrack object tracking
 - [vlm.py](/D:/CDAC_PROJECT/CV_Project/vlm.py:1): text-frame embedding search
-- [vector_index.py](/D:/CDAC_PROJECT/CV_Project/vector_index.py:1): `turbovec`-backed segment vector index with NumPy fallback
+- [vector_index.py](/D:/CDAC_PROJECT/CV_Project/vector_index.py:1): `turbovec`-backed frame and segment vector indexes with NumPy fallback
+- [florence.py](/D:/CDAC_PROJECT/CV_Project/florence.py:1): Florence-2 top-k verifier and caption generator
 - [locate_anything.py](/D:/CDAC_PROJECT/CV_Project/locate_anything.py:1): NVIDIA LocateAnything wrapper
 - [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1): LocateAnything grounding + SAM2 segmentation + segmented clip render
 - [clip_generator.py](/D:/CDAC_PROJECT/CV_Project/clip_generator.py:1): clip extraction and browser-ready finalize
@@ -152,7 +153,8 @@ This is conceptually inside [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.p
 It uses:
 
 - SigLIP2 embedding similarity
-- `turbovec` `IdMapIndex` for the primary dense vector lookup
+- `turbovec` `IdMapIndex` for the primary dense frame lookup
+- Florence-2 verification on top candidates
 - query-object overlap boosts
 - deduplication of near-identical windows
 
@@ -194,6 +196,126 @@ It configures cache paths in Colab so:
 - Ultralytics settings persist
 
 This is important because model download cost is large in Colab.
+
+## 5A.8 Detailed Tool And Model Responsibilities
+
+This section explains the exact role of each major tool in the current runtime pipeline.
+
+### Gradio
+
+Used for:
+
+- video upload
+- live scan preview
+- query input
+- result display
+- clip and report export
+
+Why it exists here:
+
+- it is the UI layer for local runs, Colab, and Hugging Face Spaces
+
+### OpenCV
+
+Used for:
+
+- frame-by-frame video reading
+- preview overlay rendering
+- sampled frame saving
+- raw and segmented clip writing
+
+Why it exists here:
+
+- it is the video I/O and frame processing backbone of the repo
+
+### YOLO11s
+
+Used for:
+
+- scan-time object detection on sampled frames
+- object labels and boxes for preview and metadata
+
+Why it exists here:
+
+- it is fast enough for broad scan-time object presence signals
+
+### ByteTrack
+
+Used for:
+
+- assigning track ids across sampled frames
+
+Why it exists here:
+
+- it gives temporal continuity without turning scan time into a heavy reasoning stage
+
+### SigLIP2
+
+Used for:
+
+- frame embedding generation
+- query embedding generation
+- primary semantic retrieval signal
+
+Why it exists here:
+
+- it is the fast retrieval model in the pipeline
+
+### turbovec
+
+Used for:
+
+- local ANN search over frame embeddings
+- local ANN search over segment embeddings
+- writing reusable `.tvim` indexes per scan
+
+Why it exists here:
+
+- it is lighter than a full vector database for this one-video-per-run workflow
+
+### Florence-2
+
+Used for:
+
+- top-k frame verification
+- richer natural-language descriptions of returned matches
+- reranking difficult semantic queries after fast retrieval
+
+Why it exists here:
+
+- it improves shortlist quality without forcing a heavy model over every sampled frame during scan
+
+### LocateAnything-3B
+
+Used for:
+
+- phrase grounding on already-shortlisted clips
+
+Why it exists here:
+
+- it answers where the queried object or region is inside a matched frame
+
+### SAM2
+
+Used for:
+
+- mask generation from grounded boxes
+- segmented preview frame generation
+- segmented clip generation
+
+Why it exists here:
+
+- it is the pixel-accurate refinement stage after grounding
+
+### ffmpeg
+
+Used for:
+
+- optional browser-friendly MP4 finalization
+
+Why it exists here:
+
+- it improves playback compatibility for generated clips
 
 ## 5B. Backend Working Explained
 
@@ -260,8 +382,9 @@ After all sampled frames are collected:
 2. Window embeddings are averaged.
 3. Object names and track ids are aggregated.
 4. The final search index is stored in memory in `self.idx`.
-5. A `turbovec` segment index is also written to disk.
-6. A JSON index report is also written to disk.
+5. A `turbovec` frame index is written to disk.
+6. A `turbovec` segment index is also written to disk.
+7. A JSON index report is also written to disk.
 
 At this point the video is searchable.
 
@@ -273,7 +396,16 @@ It contains:
 
 - source video path
 - video metadata
+- indexed frames
 - indexed windows
+
+Each indexed frame stores:
+
+- stable frame id
+- sampled timestamp
+- representative frame path
+- object names
+- track ids
 
 Each indexed window stores:
 
@@ -288,6 +420,47 @@ Each indexed window stores:
 
 This in-memory index is the reason repeated queries are possible without rescanning.
 
+## 5B.4A Actual Runtime Retrieval Structures
+
+After scanning, the backend keeps three important retrieval structures alive:
+
+### `self.idx`
+
+This is the main Python-side run state.
+
+It stores:
+
+- video metadata
+- sampled frame records
+- aggregated window records
+- paths needed later for clips and reports
+
+### `self.frame_idx`
+
+This is the primary `turbovec` ANN index.
+
+It stores:
+
+- sampled frame embeddings
+- stable frame ids
+
+It is used for:
+
+- the main query-time frame retrieval path
+
+### `self.search_idx`
+
+This is the secondary `turbovec` ANN index.
+
+It stores:
+
+- aggregated window or segment embeddings
+- stable segment ids
+
+It is used for:
+
+- a coarser fallback retrieval path
+
 ### 5B.5 What Happens During Search
 
 When the user clicks `step 2: find matches`:
@@ -295,14 +468,100 @@ When the user clicks `step 2: find matches`:
 1. `app.py` calls `find_query(q)`.
 2. `find_query(q)` calls `pipe.search(q, top_k=4)`.
 3. The query is embedded with SigLIP2.
-4. `turbovec` searches the persisted segment embedding index.
+4. `turbovec` searches the persisted frame embedding index.
 5. Query-object overlap adds a small boost or penalty.
-6. The candidate list is reranked.
-7. Nearby duplicate windows are filtered.
+6. Nearby high-scoring sampled frames are clustered into clip candidates.
+7. Florence-2 verifies the top candidates and improves the returned descriptions.
 
 This stage is search only.
 
 It does not scan the video from scratch again.
+
+## 5B.5A Query Processing Pipeline In Detail
+
+The current query path is multi-stage.
+
+### Step 1. Query normalization
+
+The raw user query is normalized to a simpler lowercase form.
+
+### Step 2. Query object inference
+
+The backend tries to infer expected tracked object classes from the query.
+
+Examples:
+
+- `person sitting` implies `person`
+- `car accident` implies vehicle-related classes
+- `parcel` may map toward bag-like classes if present in the detector output
+
+This is a support signal, not the main retrieval model.
+
+### Step 3. Query expansion
+
+Abstract event-like terms are expanded into more visually concrete variants.
+
+Examples:
+
+- `accident` expands toward phrases such as `traffic accident`, `vehicle collision`, `car crash`
+- `fight` expands toward `people fighting`, `physical fight`
+- `fall` expands toward `person falling`
+
+Why:
+
+- some words are too abstract to rely on a single raw embedding alone
+
+### Step 4. Query embedding
+
+Each expanded query variant is embedded with SigLIP2.
+
+Those embeddings are averaged and normalized into one search vector.
+
+### Step 5. Fast frame retrieval
+
+The search vector is looked up in `self.frame_idx`.
+
+This returns:
+
+- top sampled frame ids
+- base semantic similarity scores
+
+### Step 6. Lightweight reranking
+
+The backend adjusts those raw scores using:
+
+- object overlap bonuses
+- object mismatch penalties
+- a few conservative phrase hints such as `sitting`
+
+### Step 7. Temporal clustering
+
+Nearby high-scoring sampled frames are grouped into one clip candidate.
+
+This avoids returning many nearly identical rows for the same event moment.
+
+### Step 8. Florence-2 verification
+
+Only the top candidate frames are passed into Florence-2.
+
+Florence-2 generates a richer description of those shortlisted frames.
+
+That verification output is then used to:
+
+- improve the summary shown to the user
+- contribute a second semantic signal for reranking the shortlist
+
+### Step 9. Final result rows
+
+Each final row contains:
+
+- `moment`
+- `start`
+- `end`
+- summary
+- object list
+
+Those rows are what the UI table and answer block display.
 
 ### 5B.6 What Happens Right After Search
 
@@ -405,7 +664,7 @@ The backend therefore treats export as a finalization stage.
 
 Conceptual backend data flow:
 
-`video path -> sampled frames -> tracking/meta -> embeddings -> indexed windows -> query embedding -> ranked hits -> raw clips -> grounded boxes -> masks -> exports`
+`video path -> sampled frames -> tracking/meta -> embeddings -> frame index + window index -> query expansion -> query embedding -> frame retrieval -> candidate clustering -> Florence verification -> raw clips -> grounded boxes -> masks -> exports`
 
 This is the shortest accurate summary of the backend processing chain.
 
@@ -423,7 +682,7 @@ The pipeline does not semantically embed every frame.
 
 It samples frames every `sample_sec` seconds. Current default:
 
-- `sample_sec = 1.5`
+- `sample_sec = 0.75`
 
 Why:
 
@@ -434,6 +693,11 @@ Why:
 Tradeoff:
 
 - very short events between sampled frames may be missed or blurred into nearby windows
+
+Important current runtime fact:
+
+- frame retrieval is primary
+- segment retrieval is secondary support and fallback
 
 ### 6.3 Object Tracking
 
@@ -476,7 +740,7 @@ Each sampled frame is converted into an embedding with SigLIP2 in [vlm.py](/D:/C
 Current retrieval model:
 
 - `google/siglip2-base-patch16-224`
-- `turbovec` stores and searches the resulting window vectors
+- `turbovec` stores and searches the resulting frame and window vectors
 
 Why used:
 
@@ -488,7 +752,7 @@ How it works:
 
 - frame -> image embedding
 - query -> text embedding
-- cosine similarity between query and indexed windows
+- cosine similarity between query and indexed sampled frames
 
 ### 6.5 Window Indexing
 
@@ -506,14 +770,32 @@ For each window it stores:
 
 This becomes the searchable video index.
 
+The important design detail is:
+
+- frame retrieval drives the returned `moment`
+- window aggregation still helps with clip boundaries and fallback retrieval
+
 ### 6.6 Query Search
 
 When the user enters a query:
 
+1. The query is normalized and expanded.
+2. SigLIP2 embeds the expanded query.
+3. `turbovec` returns top sampled frames.
+4. Lightweight object-aware reranking is applied.
+5. Nearby top sampled frames are clustered into clip candidates.
+6. Florence-2 verifies the top candidates and improves descriptions.
+7. Final rows are returned with `moment`, `start`, and `end`.
+
+This is a frame-first retrieval pipeline.
+
+It is more precise than the older coarse segment-only retrieval path.
+
 1. The query text is embedded with SigLIP2.
-2. `turbovec` returns the top candidate windows by vector similarity.
+2. `turbovec` returns the top candidate sampled frames by vector similarity.
 3. Query-object overlap adjusts the score.
-4. Top windows are returned.
+4. Nearby frames are clustered into clip candidates.
+5. Florence-2 verifies the top candidates and produces better natural-language descriptions.
 
 Search code is in [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:179).
 
@@ -674,13 +956,32 @@ Why SigLIP2:
 - lighter than large VLM rerankers
 - practical for indexing many windows
 
+### 7.5A Florence-2
+
+Used for:
+
+- top-k frame verification after fast retrieval
+- richer natural-language descriptions of matched frames
+- reranking hard queries such as `accident`, `fight`, and `fall`
+
+Why chosen:
+
+- Microsoft vision foundation model with strong prompt-based image understanding
+- useful as a verifier without making full-video indexing too heavy
+
+Why it is not the primary retriever:
+
+- it is slower than SigLIP2 for scan-time embedding generation
+- it is better used on shortlisted frames than on every sampled frame
+
 ### 7.6 turbovec
 
 Used for:
 
+- indexing frame embeddings after scan
 - indexing segment embeddings after scan
 - fast top-k vector retrieval during search
-- writing a reusable `.tvim` vector index for each scan
+- writing reusable `.tvim` vector indexes for each scan
 
 Why chosen:
 
@@ -696,7 +997,7 @@ Alternatives:
 
 Why it fits this repo:
 
-- the pipeline already creates one embedding per searchable segment
+- the pipeline already creates one embedding per searchable frame and segment
 - segment ids need to stay stable across retrieval and export
 - it improves query latency without changing the grounding stage
 
@@ -755,6 +1056,7 @@ Current defaults from code:
 
 - tracker: `yolo11s.pt`
 - retrieval: `google/siglip2-base-patch16-224`
+- verifier: `microsoft/Florence-2-base`
 - vector retriever: `turbovec` `IdMapIndex`
 - grounding primary: `nvidia/LocateAnything-3B`
 - segmentation: `facebook/sam2.1-hiera-small`
@@ -782,9 +1084,10 @@ This is the main optimization concept of the project.
 ## 10. Performance Optimizations Already Present
 
 - scan-first indexing
-- frame sampling instead of full semantic embedding on every frame
+- denser frame sampling for better timestamp precision
 - averaged window embeddings
-- `turbovec` top-k vector retrieval instead of full Python rescoring over every segment
+- `turbovec` top-k vector retrieval instead of full Python rescoring over every frame or segment
+- Florence-2 verification only on top candidates
 - background clip trimming
 - background segmentation start for the first result
 - atomic clip writes to avoid broken partially-written MP4s
@@ -1375,8 +1678,9 @@ Important truth:
 This project is best understood as a layered surveillance search system:
 
 - YOLO + ByteTrack answers: what objects are present
-- SigLIP2 answers: which windows are semantically similar to the query
-- turbovec answers: which indexed segment embeddings should be searched first
+- SigLIP2 answers: which sampled frames are semantically similar to the query
+- turbovec answers: which indexed frame embeddings should be searched first
+- Florence-2 answers: which top candidate frames are better described and should be reranked higher
 - LocateAnything answers: where is the queried thing in the matched frame
 - SAM2 answers: what exact region should be highlighted
 - Clip/report generation answers: how to deliver the result to the user

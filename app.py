@@ -35,7 +35,8 @@ def _meta(meta):
         f"- fps: `{meta['fps']:.2f}`\n"
         f"- sampled every: `{meta['sample_sec']:.2f}s`\n"
         f"- indexed windows: `{meta['segments']}`\n"
-        f"- retriever: `{meta.get('retriever', 'numpy')}`"
+        f"- retriever: `{meta.get('retriever', 'numpy')}`\n"
+        f"- verifier: `{meta.get('verifier', 'none')}`"
     )
 
 
