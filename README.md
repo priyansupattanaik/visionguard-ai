@@ -7,7 +7,7 @@ pinned: false
 
 # VisionGuard AI
 
-Natural-language CCTV search with a scan-first workflow, live indexing preview, matched clip segmentation, per-match export, and timestamp reports.
+Natural-language CCTV search with a scan-first workflow, live indexing preview, matched-frame results, on-demand export, and timestamp reports.
 
 Full project documentation:
 
@@ -32,7 +32,7 @@ Full project documentation:
 - Added frame-first retrieval plus `Florence-2` top-k verification for better timestamp precision
 - Added per-match export with CSV/JSON/HTML/ZIP outputs
 - Reduced repeated downloads by supporting Drive-backed cache in Colab
-- Removed clip extraction from the initial query path so search returns timestamps first and generates clips only when you open or export a match
+- Removed clip extraction from the initial query path so search returns matched frames and timestamps first and generates clips only when you export selected matches
 - Removed noisy event-tag injection from runtime search to reduce false positives
 
 ## Local run
@@ -112,7 +112,7 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 3. Watch live indexing preview until scan completes.
 4. Enter a natural-language query.
 5. Click `step 2: find matches`.
-6. Use `view one match` to switch clips.
+6. Review the matched-frame gallery and timestamp table.
 7. Export only the clips and reports you want.
 
 ## Notes
@@ -121,4 +121,4 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 - Best experience comes from GPU-backed Colab or GPU-enabled Spaces.
 - Search now uses frame-first retrieval with semantic query expansion, object-aware reranking, and `Florence-2` verification on top candidates.
 - Frame and segment embeddings are persisted to local `turbovec` indexes per scan, so repeated queries use the vector index instead of rescoring everything in Python.
-- The UI writes a short answer block below the query and shows representative matched frames immediately.
+- The UI writes a short answer block below the query and shows matched sampled frames immediately.

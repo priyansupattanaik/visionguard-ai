@@ -9,6 +9,8 @@ from pipeline import VisionGuardPipeline
 setup_cache()
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="gradio.*")
 warnings.filterwarnings("ignore", category=UserWarning, message="The parameters have been moved from the Blocks constructor to the launch\\(\\) method in Gradio 6\\.0: theme, css.*")
+warnings.filterwarnings("ignore", message="The 'theme' parameter in the Blocks constructor will be removed in Gradio 6\\.0.*")
+warnings.filterwarnings("ignore", message="The 'css' parameter in the Blocks constructor will be removed in Gradio 6\\.0.*")
 pipe = VisionGuardPipeline()
 theme = gr.themes.Soft(primary_hue="cyan", secondary_hue="slate")
 css = """
@@ -51,6 +53,10 @@ def _ans(q, rows):
     return "\n".join(out)
 
 
+def _gallery(rows):
+    return [(x["frame_path"], f"{x['label']} | {x['summary']}") for x in rows if x.get("frame_path")]
+
+
 def scan_only(video):
     if not video:
         yield "upload a video first", None, "", gr.update(interactive=False), "", []
@@ -67,28 +73,18 @@ def scan_only(video):
 
 def find_query(q):
     blank_pick = gr.update(choices=[], value=[])
-    blank_one = gr.update(choices=[], value=None)
     if not pipe.idx:
-        return "scan a video first", "", [], None, [], blank_pick, blank_one, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+        return "scan a video first", "", [], blank_pick, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
     if not q or not q.strip():
-        return "enter a natural-language query", "", [], None, [], blank_pick, blank_one, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+        return "enter a natural-language query", "", [], blank_pick, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
     hits = pipe.search(q.strip(), top_k=4)
     seg = pipe.prepare_hits(hits, q.strip())
     rows = [[i, round(x["score"], 4), round(x.get("peak_ts", x["start"]), 2), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])] for i, x in enumerate(seg, 1)]
     ans = _ans(q.strip(), seg)
     choices = [x["label"] for x in seg]
-    first = seg[0]["raw_clip"] if seg else None
-    ready = [x["raw_clip"] for x in seg if x["raw_clip"]]
-    gal = [(x["frame_path"], x["label"]) for x in seg]
-    note = f"### {seg[0]['label']}\n\n{seg[0]['summary']}\n\nrepresentative frames are shown first. first clip is ready now. other clips are trimming in the background." if seg else ""
-    return "matches ready", ans, rows, first, ready, gr.update(choices=choices, value=choices[:1]), gr.update(choices=choices, value=choices[0] if choices else None), gal, note, q.strip(), seg, gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
-
-
-def show_match(label, q, hits):
-    if not hits or not label:
-        return None, [], ""
-    pipe.last_hits = hits
-    return pipe.pick_match(label, q)
+    gal = _gallery(seg)
+    note = "### matched frames\n\nThe gallery below shows the top sampled frames for your query. Select any rows you want to export as clips and reports." if seg else ""
+    return "matches ready", ans, rows, gr.update(choices=choices, value=choices[:1]), gal, note, q.strip(), seg, gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
 
 
 def export_selected(picks, q, hits):
@@ -130,22 +126,18 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=theme) as demo:
         with gr.Column(scale=2, elem_classes="panel result-stack"):
             answer = gr.Markdown(elem_classes="tight-md")
             table = gr.Dataframe(headers=["rank", "score", "moment", "start", "end", "summary", "objects"], interactive=False, wrap=True)
-            pick_one = gr.Dropdown(label="view one match", choices=[], value=None)
-            clip = gr.Video(label="selected match clip", elem_classes="hidden-empty")
-            clips = gr.Files(label="all matched clips")
             pick = gr.CheckboxGroup(label="choose clips to export")
             export_btn = gr.Button("export selected")
             with gr.Row(elem_classes="export-files"):
                 zipf = gr.File(label="zip", visible=False)
                 html = gr.File(label="html report", visible=False)
                 csv = gr.File(label="csv report", visible=False)
-            gallery = gr.Gallery(label="segmented preview frames", columns=3, height="auto")
+            gallery = gr.Gallery(label="matched frames", columns=2, height="auto")
             match_md = gr.Markdown(elem_classes="tight-md")
 
     scan_btn.click(scan_only, [video], [status, live, info, query, q_state, hits_state])
     scan_btn.click(lambda: gr.update(interactive=True), None, find_btn)
-    find_btn.click(find_query, [query], [status, answer, table, clip, clips, pick, pick_one, gallery, match_md, q_state, hits_state, zipf, html, csv])
-    pick_one.change(show_match, [pick_one, q_state, hits_state], [clip, gallery, match_md])
+    find_btn.click(find_query, [query], [status, answer, table, pick, gallery, match_md, q_state, hits_state, zipf, html, csv])
     export_btn.click(export_selected, [pick, q_state, hits_state], [zipf, html, csv])
 
 

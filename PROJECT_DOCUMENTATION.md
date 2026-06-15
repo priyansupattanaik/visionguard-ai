@@ -42,9 +42,9 @@ The current app flow is:
 4. After scan completes, enter a natural-language query.
 5. Click `step 2: find matches`.
 6. The system searches indexed sampled frames, clusters them into clip candidates, verifies the top candidates, and returns top time ranges.
-7. The first clip is prepared immediately.
-8. Other clips trim in the background.
-9. When a match is opened, localization and segmentation are prepared for that clip.
+7. The UI shows the matched-frame gallery and timestamp table immediately.
+8. No clip is generated just to view a result.
+9. Clip generation, grounding, and segmentation happen only when selected results are exported.
 10. Selected clips and reports can be exported.
 
 ## 4. Core Design Decision
@@ -570,14 +570,13 @@ Search results are converted into hit rows in `prepare_hits(...)`.
 That method:
 
 - stores hit metadata in `self.last_hits`
-- prepares the first raw clip immediately
-- starts background raw-clip jobs for the remaining hits
-- starts background segmentation for the first hit
+- prepares labels and gallery-ready rows for the UI
+- defers clip generation until export time
 
 Why this matters:
 
-- the first result becomes watchable sooner
-- the user does not wait for every clip before interacting
+- matched frames appear faster
+- the user does not pay clip-generation cost unless export is requested
 
 ### 5B.7 Background Jobs
 
@@ -595,18 +594,17 @@ The important idea is:
 - the pipeline returns control early
 - clip processing continues in worker threads
 
-### 5B.8 What Happens When a Match Is Opened
+### 5B.8 What Happens When Export Is Requested
 
-When the user selects a specific match:
+When the user selects matches for export:
 
-1. `app.py` calls `show_match(...)`.
-2. `show_match(...)` calls `pipe.pick_match(label, q)`.
-3. The backend checks whether the raw clip is already ready.
-4. The backend checks whether segmented output is already finished.
-5. If not ready, it returns the raw clip first and keeps segmentation in background.
-6. If ready, it returns the segmented clip and preview frames.
+1. `app.py` calls `export_selected(...)`.
+2. `export_selected(...)` calls `pipe.export_selected(...)`.
+3. The backend generates raw clips for the selected matches.
+4. The backend runs grounding and segmentation for those selected clips.
+5. Reports and archive files are written.
 
-This is why the current backend tries not to block clip viewing.
+This is why the current UI stays frame-first while still supporting clip/report export.
 
 ### 5B.9 How Localization Works Internally
 
@@ -1436,8 +1434,8 @@ A: It can produce incorrect retrievals or weak event matches. No honest open-wor
 Q: What optimizations are used?  
 A: Frame sampling, scan-first indexing, frame-first ANN retrieval with turbovec, selective Florence verification, background clip trimming, on-demand segmentation, caching, and atomic video writes.
 
-Q: Why is the first clip shown faster now?  
-A: Because only the first result is prepared immediately and the others trim in background.
+Q: Why are matched frames shown faster now?  
+A: Because the query flow no longer generates clips just to display search results. It shows frame results first and defers clip generation until export.
 
 Q: Why are atomic writes used for clips?  
 A: To prevent broken MP4 files from being exposed before writing finishes.

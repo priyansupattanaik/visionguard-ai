@@ -474,14 +474,9 @@ class VisionGuardPipeline:
             row["clip"] = None
             row["frames"] = []
             row["segmented"] = False
-            row["label"] = f"{i}. {hit['start']:.2f}s - {hit['end']:.2f}s"
+            row["label"] = f"{i}. {hit.get('peak_ts', hit['start']):.2f}s"
             out.append(row)
         self.last_hits = out
-        if out:
-            self._ensure_raw_clip(out[0], wait=True)
-            self._start_segment(out[0], query)
-            for row in out[1:]:
-                self._ensure_raw_clip(row, wait=False)
         return out
 
     def _build_raw_clip(self, row):
@@ -522,19 +517,6 @@ class VisionGuardPipeline:
             return
         self.seg_jobs[row["match_id"]] = self.pool.submit(self._segment_payload, dict(row), query)
 
-    def _collect_segment(self, row):
-        job = self.seg_jobs.get(row["match_id"])
-        if job is None or not job.done():
-            return False
-        payload = job.result()
-        row["raw_clip"] = payload["raw_clip"]
-        row["clip"] = payload["clip"]
-        row["frames"] = payload["frames"]
-        row["segmented"] = bool(payload["seen"] > 0)
-        if payload["seen"] == 0 and "no grounded mask, showing raw clip" not in row["summary"]:
-            row["summary"] = f"{row['summary']} | no grounded mask, showing raw clip"
-        return True
-
     def _ensure_segment(self, row, query):
         if row["segmented"]:
             return row
@@ -550,24 +532,6 @@ class VisionGuardPipeline:
         if payload["seen"] == 0 and "no grounded mask, showing raw clip" not in row["summary"]:
             row["summary"] = f"{row['summary']} | no grounded mask, showing raw clip"
         return row
-
-    def _segment_row(self, row, query):
-        return self._ensure_segment(row, query)
-
-    def pick_match(self, label, query):
-        for x in self.last_hits:
-            if x["label"] == label:
-                self._ensure_raw_clip(x, wait=True)
-                ready = self._collect_segment(x)
-                if not ready:
-                    self._start_segment(x, query)
-                gal = [(fp, x["label"]) for fp in x["frames"]]
-                clip = x["clip"] if x["clip"] else x["raw_clip"]
-                txt = f"### {x['label']}\n\n{x['summary']}"
-                if not ready and not x["frames"]:
-                    txt = f"{txt}\n\nsegmentation is preparing in the background. Open this match again in a few seconds."
-                return clip, gal, txt
-        return None, [], ""
 
     def export_selected(self, picks, query):
         rows = [x for x in self.last_hits if x["label"] in picks]
