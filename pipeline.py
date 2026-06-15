@@ -37,6 +37,70 @@ class VisionGuardPipeline:
         self.seg_jobs = {}
         os.makedirs(out_dir, exist_ok=True)
 
+    def _color_words(self):
+        return {
+            "yellow": np.array([220.0, 190.0, 60.0], dtype=np.float32),
+            "white": np.array([215.0, 215.0, 215.0], dtype=np.float32),
+            "black": np.array([35.0, 35.0, 35.0], dtype=np.float32),
+            "gray": np.array([135.0, 135.0, 135.0], dtype=np.float32),
+            "red": np.array([180.0, 65.0, 65.0], dtype=np.float32),
+            "blue": np.array([70.0, 110.0, 185.0], dtype=np.float32),
+            "green": np.array([80.0, 150.0, 90.0], dtype=np.float32),
+            "orange": np.array([210.0, 140.0, 65.0], dtype=np.float32),
+            "brown": np.array([125.0, 95.0, 70.0], dtype=np.float32),
+        }
+
+    def _query_colors(self, q):
+        q = f" {self._normalize_query(q)} "
+        return [x for x in self._color_words().keys() if f" {x} " in q]
+
+    def _estimate_color(self, frame, box):
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = [int(round(v)) for v in box]
+        x1 = max(0, min(w - 1, x1))
+        x2 = max(1, min(w, x2))
+        y1 = max(0, min(h - 1, y1))
+        y2 = max(1, min(h, y2))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB).reshape(-1, 3).astype(np.float32)
+        bright = rgb.mean(axis=1)
+        sat = rgb.max(axis=1) - rgb.min(axis=1)
+        keep = sat > 18
+        if keep.any():
+            rgb = rgb[keep]
+        mean = rgb.mean(axis=0)
+        palette = self._color_words()
+        best = None
+        best_dist = 1e9
+        for name, ref in palette.items():
+            d = float(np.linalg.norm(mean - ref))
+            if d < best_dist:
+                best = name
+                best_dist = d
+        if bright.mean() > 205 and sat.mean() < 30:
+            return "white"
+        if bright.mean() < 55:
+            return "black"
+        if sat.mean() < 22:
+            return "gray"
+        return best
+
+    def _appearance_tags(self, frame, tracks):
+        tags = []
+        for t in tracks:
+            name = t["name"]
+            if name not in {"car", "truck", "bus", "motorcycle", "bicycle"}:
+                continue
+            color = self._estimate_color(frame, t["box"])
+            if color:
+                tags.append(f"{color} {name}")
+            tags.append(name)
+        return sorted(set(tags))
+
     def _clip_name(self, i, kind):
         return f"match_{i:02d}_{kind}"
 
@@ -180,6 +244,11 @@ class VisionGuardPipeline:
         label = ", ".join(objs) if objs else "no tracked objects"
         return f"best matching sampled frame at {peak_ts:.2f}s | detected: {label}"
 
+    def _clip_bounds(self, ts, pad=None):
+        pad = self.idx["meta"]["sample_sec"] if pad is None else pad
+        dur = self.idx["meta"]["duration"]
+        return max(0.0, ts - pad), min(dur, ts + pad)
+
     def _verify_rows(self, rows, query, top_n=6):
         if not rows:
             return rows
@@ -211,16 +280,18 @@ class VisionGuardPipeline:
         for chunk in clusters:
             peak = max(chunk, key=lambda x: x["score"])
             objs = sorted({obj for row in chunk for obj in row["objects"]})
+            start, end = self._clip_bounds(peak["ts"], pad=max(gap_sec, self.idx["meta"]["sample_sec"]))
             out.append({
                 "query": peak["query"],
                 "score": max(x["score"] for x in chunk),
                 "base_score": peak["base_score"],
-                "start": max(0.0, chunk[0]["ts"] - gap_sec),
-                "end": chunk[-1]["ts"] + gap_sec,
+                "start": start,
+                "end": end,
                 "peak_ts": peak["ts"],
                 "frame_path": peak["frame_path"],
                 "objects": objs,
                 "tracks": sorted({tid for row in chunk for tid in row["tracks"]}),
+                "appearances": sorted({tag for row in chunk for tag in row.get("appearances", [])}),
                 "tags": [],
                 "summary": self._frame_summary(peak["query"], peak["ts"], objs),
             })
@@ -236,6 +307,7 @@ class VisionGuardPipeline:
 
     def _fallback_object_hits(self, q, top_k):
         qobjs = set(self._q_objs(q))
+        qcolors = set(self._query_colors(q))
         if not qobjs:
             return []
         rows = []
@@ -244,7 +316,16 @@ class VisionGuardPipeline:
             hit = len(sobj & qobjs)
             if not hit:
                 continue
-            score = 0.2 + 0.08 * hit
+            appear = set(row.get("appearances", []))
+            color_hit = 0
+            if qcolors:
+                for color in qcolors:
+                    for obj in qobjs:
+                        if f"{color} {obj}" in appear:
+                            color_hit += 1
+                if color_hit == 0:
+                    continue
+            score = 0.2 + 0.08 * hit + 0.14 * color_hit
             rows.append({
                 "query": q,
                 "score": score,
@@ -253,14 +334,36 @@ class VisionGuardPipeline:
                 "frame_path": row["frame_path"],
                 "objects": row["objects"],
                 "tracks": row["tracks"],
+                "appearances": row.get("appearances", []),
             })
         rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         if not rows:
             return []
-        gap = max(self.idx["meta"]["sample_sec"] * 1.25, 1.0)
-        hits = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=gap)
+        hits = []
+        for row in rows:
+            if len(hits) >= top_k:
+                break
+            if any(abs(row["ts"] - x["peak_ts"]) < 2.0 for x in hits):
+                continue
+            start, end = self._clip_bounds(row["ts"])
+            hits.append({
+                "query": q,
+                "score": row["score"],
+                "base_score": row["base_score"],
+                "start": start,
+                "end": end,
+                "peak_ts": row["ts"],
+                "frame_path": row["frame_path"],
+                "objects": row["objects"],
+                "tracks": row["tracks"],
+                "appearances": row.get("appearances", []),
+                "tags": [],
+                "summary": self._frame_summary(q, row["ts"], row["objects"]),
+            })
         for hit in hits:
-            hit["summary"] = f"object-matched sampled frame at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects'])}"
+            appear = ", ".join(hit.get("appearances", []))
+            suffix = f" | appearance: {appear}" if appear else ""
+            hit["summary"] = f"object-matched sampled frame at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects'])}{suffix}"
             hit["low_confidence"] = True
         return hits
 
@@ -309,6 +412,7 @@ class VisionGuardPipeline:
             meta = {
                 "objects": objs,
                 "tracks": sorted(set(tids)),
+                "appearances": self._appearance_tags(frame, tracks),
                 "still_people": still if objs.get("person", 0) else 0,
                 "person": objs.get("person", 0),
             }
@@ -370,6 +474,7 @@ class VisionGuardPipeline:
                     "ts": x["ts"],
                     "frame_path": x["frame_path"],
                     "objects": sorted(x["meta"]["objects"].keys()),
+                    "appearances": x["meta"]["appearances"],
                     "tracks": x["meta"]["tracks"],
                 }
                 for x in frames
@@ -398,6 +503,7 @@ class VisionGuardPipeline:
                         "ts": x["ts"],
                         "frame_path": x["frame_path"],
                         "objects": x["objects"],
+                        "appearances": x["appearances"],
                     }
                     for x in self.idx["frames"]
                 ],
@@ -431,6 +537,7 @@ class VisionGuardPipeline:
         qv = self._embed_query(q)
         ql = q
         qobjs = self._q_objs(q)
+        qcolors = set(self._query_colors(q))
         frames = self.idx.get("frames", [])
         frame_map = {int(x["frame_id"]): x for x in frames}
         fetch_k = min(max(top_k * 12, 36), len(frames))
@@ -442,12 +549,23 @@ class VisionGuardPipeline:
                 continue
             score = float(base_score)
             sobj = set(row["objects"])
+            appear = set(row.get("appearances", []))
             if qobjs:
                 hit = len(sobj & set(qobjs))
                 if hit:
                     score += 0.1 * hit
                 else:
                     score -= 0.08
+            if qcolors and qobjs:
+                color_hit = 0
+                for color in qcolors:
+                    for obj in qobjs:
+                        if f"{color} {obj}" in appear:
+                            color_hit += 1
+                if color_hit:
+                    score += 0.22 * color_hit
+                else:
+                    score -= 0.12
             if any(x in ql for x in ["accident", "collision", "crash"]) and sobj & {"car", "truck", "bus", "motorcycle", "bicycle"}:
                 score += 0.08
             if "sitting" in ql and "person" in sobj:
@@ -459,6 +577,7 @@ class VisionGuardPipeline:
                 "ts": row["ts"],
                 "frame_path": row["frame_path"],
                 "objects": row["objects"],
+                "appearances": row.get("appearances", []),
                 "tracks": row["tracks"],
             })
         ranked_rows = sorted(rows, key=lambda x: x["score"], reverse=True)
