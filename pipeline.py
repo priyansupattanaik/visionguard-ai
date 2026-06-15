@@ -19,12 +19,12 @@ setup_cache()
 
 
 class VisionGuardPipeline:
-    def __init__(self, out_dir="output", yolo="yolo11s.pt", clip_model="google/siglip2-base-patch16-224", florence_model="microsoft/Florence-2-base", locate_model="nvidia/LocateAnything-3B", sam="facebook/sam2.1-hiera-small"):
+    def __init__(self, out_dir="output", yolo="yolo11m.pt", clip_model="google/siglip2-so400m-patch14-384", florence_model="microsoft/Florence-2-large", sam="facebook/sam2.1-hiera-small"):
         self.out_dir = out_dir
         self.trk = ObjectTracker(model=yolo)
         self.enc = SearchEncoder(model=clip_model)
         self.ver = FlorenceVerifier(model=florence_model)
-        self.seg = GroundedSegmenter(sam=sam, locate_model=locate_model)
+        self.seg = GroundedSegmenter(sam=sam, florence_model=florence_model, florence=self.ver)
         self.idx = None
         self.run_dir = None
         self.clip = None

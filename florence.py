@@ -1,13 +1,14 @@
 import os
 
 import cv2
+import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor
 
 
 class FlorenceVerifier:
-    def __init__(self, model="microsoft/Florence-2-base", device=None, task="<MORE_DETAILED_CAPTION>"):
+    def __init__(self, model="microsoft/Florence-2-large", device=None, task="<MORE_DETAILED_CAPTION>"):
         self.model_name = model
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.task = task
@@ -45,6 +46,26 @@ class FlorenceVerifier:
                 return val.strip()
         return text.replace(self.task, "").strip()
 
+    def _image_from_frame(self, frame):
+        img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        return img, img.size
+
+    def _run_task(self, frame, task_prompt, text_input=None, max_new_tokens=256):
+        self.load()
+        if self.m is None or self.p is None:
+            return None
+        img, (w, h) = self._image_from_frame(frame)
+        prompt = task_prompt if text_input is None else f"{task_prompt}{text_input}"
+        inp = self.p(text=prompt, images=img, return_tensors="pt")
+        inp = {k: v.to(self.m.device) if hasattr(v, "to") else v for k, v in inp.items()}
+        try:
+            with torch.no_grad():
+                out = self.m.generate(**inp, max_new_tokens=max_new_tokens, num_beams=3, do_sample=False)
+            text = self.p.batch_decode(out, skip_special_tokens=False)[0]
+            return self.p.post_process_generation(text, task=task_prompt, image_size=(w, h))
+        except Exception:
+            return None
+
     def caption_path(self, frame_path):
         if frame_path in self.cache:
             return self.cache[frame_path]
@@ -68,3 +89,24 @@ class FlorenceVerifier:
             caption = ""
         self.cache[frame_path] = caption
         return caption
+
+    def ground_frame(self, frame, phrase):
+        parsed = self._run_task(frame, "<CAPTION_TO_PHRASE_GROUNDING>", text_input=phrase, max_new_tokens=512)
+        payload = parsed.get("<CAPTION_TO_PHRASE_GROUNDING>") if isinstance(parsed, dict) else None
+        if not isinstance(payload, dict):
+            return [], [], []
+        boxes = payload.get("bboxes", []) or []
+        labels = payload.get("labels", []) or []
+        clean_boxes = []
+        scores = []
+        clean_labels = []
+        for i, box in enumerate(boxes):
+            if not isinstance(box, (list, tuple)) or len(box) != 4:
+                continue
+            vals = [float(v) for v in box]
+            if vals[2] <= vals[0] or vals[3] <= vals[1]:
+                continue
+            clean_boxes.append(vals)
+            clean_labels.append(str(labels[i]) if i < len(labels) else phrase.strip().lower())
+            scores.append(max(0.15, 1.0 - 0.08 * i))
+        return clean_boxes, scores, clean_labels

@@ -15,11 +15,10 @@ Full project documentation:
 
 ## Stack
 
-- `ultralytics` `yolo11s.pt` + ByteTrack for live indexing preview and object tracking
-- `transformers` `google/siglip2-base-patch16-224` for text-frame retrieval
+- `ultralytics` `yolo11m.pt` + BoT-SORT for live indexing preview and object tracking
+- `transformers` `google/siglip2-so400m-patch14-384` for text-frame retrieval
 - `turbovec` `IdMapIndex` for persisted frame and segment embedding search
-- `transformers` `microsoft/Florence-2-base` for top-k frame verification and description
-- `transformers` `nvidia/LocateAnything-3B` for query grounding on matched clips
+- `transformers` `microsoft/Florence-2-large` for top-k frame verification, description, and grounding
 - `transformers` `facebook/sam2.1-hiera-small` for matched clip segmentation
 - `gradio` for the UI
 - OpenCV for video read/write
@@ -27,8 +26,10 @@ Full project documentation:
 ## What changed
 
 - Added live indexing preview during scan
-- Added LocateAnything + SAM2 segmentation on matched clips
-- Added `turbovec` as the primary segment retriever with NumPy fallback
+- Upgraded scan-time detector/tracker to `yolo11m.pt` + BoT-SORT
+- Upgraded retrieval model to `google/siglip2-so400m-patch14-384`
+- Switched grounding and verification to `microsoft/Florence-2-large`
+- Added `turbovec` as the primary frame/segment retriever with NumPy fallback
 - Added frame-first retrieval plus `Florence-2` top-k verification for better timestamp precision
 - Added per-match export with CSV/JSON/HTML/ZIP outputs
 - Reduced repeated downloads by supporting Drive-backed cache in Colab
@@ -103,7 +104,7 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 ### Notes
 
 - CPU Spaces will work but will be slow for segmentation.
-- GPU Spaces are strongly recommended for LocateAnything + SAM2.
+- GPU Spaces are strongly recommended for Florence-2-large + SAM2.
 - If you want tighter version control, add `sdk_version` in the YAML block at the top of this file.
 
 ## App Flow
@@ -120,7 +121,7 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 
 - Mount Drive in Colab before running if you want model downloads cached between sessions.
 - Best experience comes from GPU-backed Colab or GPU-enabled Spaces.
-- Search now uses frame-first retrieval with semantic query expansion, object-aware reranking, and `Florence-2` verification on top candidates.
+- Search now uses frame-first retrieval with a higher-capacity SigLIP2 encoder, object-aware reranking, and `Florence-2-large` verification on top candidates.
 - Vehicle queries with color words now use coarse per-frame appearance tags, so `yellow car` is not treated the same as any generic `car`.
 - Frame and segment embeddings are persisted to local `turbovec` indexes per scan, so repeated queries use the vector index instead of rescoring everything in Python.
 - The UI writes a short answer block below the query and shows matched sampled frames immediately.

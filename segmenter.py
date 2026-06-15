@@ -7,14 +7,14 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import Sam2Model, Sam2Processor
-from locate_anything import LocateAnythingGrounder
+from florence import FlorenceVerifier
 
 
 class GroundedSegmenter:
-    def __init__(self, sam="facebook/sam2.1-hiera-small", locate_model="nvidia/LocateAnything-3B", device=None):
+    def __init__(self, sam="facebook/sam2.1-hiera-small", florence_model="microsoft/Florence-2-large", florence=None, device=None):
         self.sam_name = sam
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.loc = LocateAnythingGrounder(model=locate_model, device=self.dev)
+        self.flo = florence or FlorenceVerifier(model=florence_model, device=self.dev)
         self.sp = None
         self.sm = None
 
@@ -26,7 +26,7 @@ class GroundedSegmenter:
                 self.sm.to(self.dev)
 
     def detect(self, frame, query):
-        boxes, scores, _ = self.loc.detect(frame, query)
+        boxes, scores, _ = self.flo.ground_frame(frame, query.strip().lower())
         texts = [query.strip().lower()] * len(boxes)
         return boxes, scores, texts
 

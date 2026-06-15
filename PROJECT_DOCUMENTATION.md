@@ -64,12 +64,11 @@ Current main files:
 
 - [app.py](/D:/CDAC_PROJECT/CV_Project/app.py:1): Gradio UI and user flow
 - [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:1): end-to-end video indexing, search, background clip prep, export
-- [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1): YOLO + ByteTrack object tracking
+- [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1): YOLO11m + BoT-SORT object tracking
 - [vlm.py](/D:/CDAC_PROJECT/CV_Project/vlm.py:1): text-frame embedding search
 - [vector_index.py](/D:/CDAC_PROJECT/CV_Project/vector_index.py:1): `turbovec`-backed frame and segment vector indexes with NumPy fallback
 - [florence.py](/D:/CDAC_PROJECT/CV_Project/florence.py:1): Florence-2 top-k verifier and caption generator
-- [locate_anything.py](/D:/CDAC_PROJECT/CV_Project/locate_anything.py:1): NVIDIA LocateAnything wrapper
-- [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1): LocateAnything grounding + SAM2 segmentation + segmented clip render
+- [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1): Florence-2 grounding + SAM2 segmentation + segmented clip render
 - [clip_generator.py](/D:/CDAC_PROJECT/CV_Project/clip_generator.py:1): clip extraction and browser-ready finalize
 - [report_generator.py](/D:/CDAC_PROJECT/CV_Project/report_generator.py:1): JSON/CSV/HTML/ZIP outputs
 - [cache_utils.py](/D:/CDAC_PROJECT/CV_Project/cache_utils.py:1): Colab Drive-backed cache setup
@@ -141,7 +140,7 @@ The vision analysis layer is split across:
 
 - [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1)
 - [vlm.py](/D:/CDAC_PROJECT/CV_Project/vlm.py:1)
-- [locate_anything.py](/D:/CDAC_PROJECT/CV_Project/locate_anything.py:1)
+- [florence.py](/D:/CDAC_PROJECT/CV_Project/florence.py:1)
 - [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1)
 
 Each module owns one kind of model behavior instead of mixing everything in one file.
@@ -154,7 +153,7 @@ It uses:
 
 - SigLIP2 embedding similarity
 - `turbovec` `IdMapIndex` for the primary dense frame lookup
-- Florence-2 verification on top candidates
+- Florence-2-large verification on top candidates
 - query-object overlap boosts
 - deduplication of near-identical windows
 
@@ -168,7 +167,7 @@ Its job starts only after a match is already found.
 
 It uses:
 
-- LocateAnything-3B for primary grounding
+- Florence-2-large for primary grounding
 - SAM2 for masks
 
 ### 5A.6 Export and Reporting Layer
@@ -228,7 +227,7 @@ Why it exists here:
 
 - it is the video I/O and frame processing backbone of the repo
 
-### YOLO11s
+### YOLO11m
 
 Used for:
 
@@ -239,7 +238,7 @@ Why it exists here:
 
 - it is fast enough for broad scan-time object presence signals
 
-### ByteTrack
+### BoT-SORT
 
 Used for:
 
@@ -247,7 +246,7 @@ Used for:
 
 Why it exists here:
 
-- it gives temporal continuity without turning scan time into a heavy reasoning stage
+- it gives temporal continuity and stronger re-identification behavior than the lighter ByteTrack path
 
 ### SigLIP2
 
@@ -285,14 +284,16 @@ Why it exists here:
 
 - it improves shortlist quality without forcing a heavy model over every sampled frame during scan
 
-### LocateAnything-3B
+### Florence-2-large
 
 Used for:
 
+- top-k frame verification
 - phrase grounding on already-shortlisted clips
 
 Why it exists here:
 
+- one Florence model now handles both shortlist verification and grounding
 - it answers where the queried object or region is inside a matched frame
 
 ### SAM2
@@ -363,10 +364,10 @@ Inside `index_video_iter(...)`:
 
 For each sampled frame:
 
-1. YOLO + ByteTrack produce tracked objects.
+1. YOLO11m + BoT-SORT produce tracked objects.
 2. Object counts and ids are collected.
 3. A live preview overlay is drawn.
-4. SigLIP2 creates a frame embedding.
+4. SigLIP2 So400m creates a frame embedding.
 5. The raw frame is saved to `output/.../frames`.
 6. A preview event is yielded back to Gradio.
 
@@ -471,7 +472,7 @@ When the user clicks `step 2: find matches`:
 4. `turbovec` searches the persisted frame embedding index.
 5. Query-object overlap adds a small boost or penalty.
 6. Nearby high-scoring sampled frames are clustered into clip candidates.
-7. Florence-2 verifies the top candidates and improves the returned descriptions.
+7. Florence-2-large verifies the top candidates and improves the returned descriptions.
 
 This stage is search only.
 
@@ -566,9 +567,9 @@ This avoids returning many nearly identical rows for the same event moment.
 
 ### Step 8. Florence-2 verification
 
-Only the top candidate frames are passed into Florence-2.
+Only the top candidate frames are passed into Florence-2-large.
 
-Florence-2 generates a richer description of those shortlisted frames.
+Florence-2-large generates a richer description of those shortlisted frames.
 
 That verification output is then used to:
 
@@ -651,9 +652,9 @@ This is why the current UI stays frame-first while still supporting clip/report 
 
 For matched frames:
 
-1. `LocateAnythingGrounder.detect(...)` is called.
-2. It sends image + prompt to `nvidia/LocateAnything-3B`.
-3. It parses `<box><...></box>` style outputs into pixel boxes.
+1. Florence-2-large phrase grounding is called with `<CAPTION_TO_PHRASE_GROUNDING>`.
+2. It receives the matched frame plus the query phrase.
+3. It returns grounded pixel boxes for the requested phrase.
 4. Those boxes are passed into SAM2.
 
 This is done in [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:32).
@@ -743,14 +744,14 @@ Important current runtime fact:
 For each sampled frame:
 
 - YOLO detects objects
-- ByteTrack keeps track ids across time
+- BoT-SORT keeps track ids across time
 
 This is handled by [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:11).
 
 Current tracker stack:
 
-- model: `yolo11s.pt`
-- tracker: `bytetrack.yaml`
+- model: `yolo11m.pt`
+- tracker: `botsort.yaml`
 
 Why used:
 
@@ -779,7 +780,7 @@ Each sampled frame is converted into an embedding with SigLIP2 in [vlm.py](/D:/C
 
 Current retrieval model:
 
-- `google/siglip2-base-patch16-224`
+- `google/siglip2-so400m-patch14-384`
 - `turbovec` stores and searches the resulting frame and window vectors
 
 Why used:
@@ -862,18 +863,18 @@ Why:
 
 Matched clips use a layered localization design in [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:12):
 
-1. `LocateAnything-3B` grounds the natural-language phrase.
+1. `Florence-2-large` grounds the natural-language phrase.
 2. SAM2 segments the grounded boxes.
 3. The project renders segmented preview frames and a segmented clip.
 
 Why this hybrid design:
 
-- `LocateAnything-3B` is strong for free-form grounding and dense cluttered localization
+- `Florence-2-large` is strong enough to verify frames and ground phrases within one model family
 - SAM2 gives region masks, not just boxes
 
 Important limitation:
 
-- LocateAnything improves localization, not temporal event recognition
+- Florence grounding improves localization, not temporal event recognition
 - SAM2 segments what is localized, but does not understand whether a collision or fight really happened
 
 ### 6.9 Export
@@ -954,7 +955,7 @@ Why YOLO stayed:
 - faster and simpler for broad scan-time object presence
 - useful even when event detection is weak
 
-### 7.4 ByteTrack
+### 7.4 BoT-SORT
 
 Used for:
 
@@ -965,12 +966,12 @@ Alternatives:
 - BoT-SORT
 - DeepSORT
 
-Why ByteTrack:
+Why BoT-SORT:
 
-- stable default from Ultralytics flow
-- good speed/quality tradeoff
+- stronger identity continuity than a lighter ByteTrack path
+- better suited to occlusion-heavy CCTV scenes when GPU headroom allows
 
-### 7.5 SigLIP2
+### 7.5 SigLIP2 So400m/14 384
 
 Used for:
 
@@ -984,13 +985,13 @@ Alternatives:
 - BLIP2 embeddings
 - Qwen-VL style reranking
 
-Why SigLIP2:
+Why this SigLIP2 variant:
 
-- strong vision-text retrieval
-- lighter than large VLM rerankers
-- practical for indexing many sampled frames
+- stronger retrieval capacity than the smaller base/224 model
+- higher input resolution for better frame discrimination
+- still API-compatible with the existing embedding path
 
-### 7.5A Florence-2
+### 7.5A Florence-2-large
 
 Used for:
 
@@ -1035,22 +1036,22 @@ Why it fits this repo:
 - frame ids and segment ids need to stay stable across retrieval and export
 - it improves query latency without changing the grounding stage
 
-### 7.7 LocateAnything-3B
+### 7.7 Florence-2-large Grounding
 
 Used for:
 
-- matched-frame visual grounding from natural-language phrases
+- matched-frame phrase grounding from natural-language phrases
 
 Alternatives:
 
 - Grounding DINO
 - OWL-ViT
-- Florence-2 style grounding workflows
+- LocateAnything-3B
 
 Why it was added:
 
-- better open-vocabulary grounding intent
-- designed for dense and cluttered grounding
+- one Florence model now covers both shortlist verification and grounding
+- stable Hugging Face release
 - strong fit for `locate the person`, `locate the white car`, `locate all the instances`
 
 Important note:
@@ -1088,11 +1089,12 @@ Why SAM2:
 
 Current defaults from code:
 
-- tracker: `yolo11s.pt`
-- retrieval: `google/siglip2-base-patch16-224`
-- verifier: `microsoft/Florence-2-base`
+- tracker: `yolo11m.pt`
+- tracker mode: `botsort.yaml`
+- retrieval: `google/siglip2-so400m-patch14-384`
+- verifier: `microsoft/Florence-2-large`
 - vector retriever: `turbovec` `IdMapIndex`
-- grounding primary: `nvidia/LocateAnything-3B`
+- grounding primary: `microsoft/Florence-2-large`
 - segmentation: `facebook/sam2.1-hiera-small`
 
 ## 9. Why the Project Does Not Process Every Frame for Everything
@@ -1123,8 +1125,6 @@ This is the main optimization concept of the project.
 - `turbovec` top-k vector retrieval instead of full Python rescoring over every frame or segment
 - Florence-2 verification only on top candidates
 - clip generation deferred until export
-- background clip trimming
-- background segmentation start for the first result
 - atomic clip writes to avoid broken partially-written MP4s
 - optional ffmpeg finalize to browser-friendly H.264 output
 - Colab Drive cache for Hugging Face and Torch assets
@@ -1230,15 +1230,15 @@ Impact:
 
 - warning only unless runtime actually fails
 
-### 14.4 LocateAnything Load Risk
+### 14.4 Florence-2 Load Risk
 
 Meaning:
 
-- `trust_remote_code=True` research model path may change upstream
+- `trust_remote_code=True` model loading can still break if upstream behavior changes
 
 Impact:
 
-- if it fails, matched-clip grounding fails because the current runtime stack no longer keeps a grounding fallback model
+- if it fails, both shortlist verification and grounding are affected because the current runtime intentionally uses one Florence grounding framework instead of parallel fallbacks
 
 ## 14A. Terms and Meanings
 
@@ -1330,22 +1330,22 @@ This is why repeated queries are faster later.
 
 This section records the current model-selection conclusion based on official sources.
 
-### 14B.1 LocateAnything-3B
+### 14B.1 Florence-2-large
 
-Officially, LocateAnything-3B is presented as a visual grounding model for:
+Officially, Florence-2-large is presented as a prompt-driven vision foundation model that supports:
 
+- captioning
 - phrase grounding
-- dense object detection
-- open-set localization
-- cluttered-scene localization
+- object detection
+- dense region captioning
 
 Why it helps this project:
 
-- better natural-language localization of people, cars, trucks, and other queried regions
+- one model family can verify matched frames and ground phrases inside them
 
 Why it does not solve everything:
 
-- it localizes regions in frames
+- it localizes and describes regions in frames
 - it does not by itself recognize temporal events like collisions across time
 
 ### 14B.2 VideoMAE and TimeSformer
@@ -1469,11 +1469,11 @@ A: It provides text-image retrieval embeddings for semantic search.
 Q: Why use Florence-2?  
 A: It acts as a second-stage verifier and description model on top candidates, improving difficult semantic queries without slowing the full scan stage too much.
 
-Q: Why use LocateAnything-3B?  
-A: It improves open-vocabulary grounding on matched frames from natural-language phrases.
+Q: Why use Florence-2-large for grounding too?  
+A: It lets the runtime use one active Florence model family for both shortlist verification and matched-frame phrase grounding instead of mixing two grounding frameworks.
 
-Q: Why was Grounding DINO removed from the active runtime path?  
-A: To reduce model downloads and simplify the runtime stack after moving to LocateAnything as the primary grounding model.
+Q: Why was the older LocateAnything path removed from the active runtime?  
+A: To simplify the grounding stack around one Florence grounding framework and avoid maintaining parallel active grounding paths.
 
 Q: Why use SAM2?  
 A: To convert grounded boxes into region masks and segmented previews.
@@ -1492,7 +1492,7 @@ A: It can produce incorrect retrievals or weak event matches. No honest open-wor
 ### 18.5 Optimization
 
 Q: What optimizations are used?  
-A: Frame sampling, scan-first indexing, frame-first ANN retrieval with turbovec, selective Florence verification, background clip trimming, on-demand segmentation, caching, and atomic video writes.
+A: Frame sampling, scan-first indexing, frame-first ANN retrieval with turbovec, selective Florence verification, export-only clip generation, on-demand segmentation, caching, and atomic video writes.
 
 Q: Why are matched frames shown faster now?  
 A: Because the query flow no longer generates clips just to display search results. It shows frame results first and defers clip generation until export.
@@ -1743,12 +1743,11 @@ Important truth:
 
 This project is best understood as a layered surveillance search system:
 
-- YOLO + ByteTrack answers: what objects are present
+- YOLO11m + BoT-SORT answers: what objects are present and how they persist across sampled frames
 - appearance tagging answers: whether a supported tracked vehicle crop looks roughly like `yellow car`, `white bus`, and similar phrases
 - SigLIP2 answers: which sampled frames are semantically similar to the query
 - turbovec answers: which indexed frame embeddings should be searched first
-- Florence-2 answers: which top candidate frames are better described and should be reranked higher
-- LocateAnything answers: where is the queried thing in the matched frame
+- Florence-2-large answers: which top candidate frames are better described, and where the queried thing is in the matched frame
 - SAM2 answers: what exact region should be highlighted
 - Clip/report generation answers: how to deliver the result to the user
 
