@@ -6,58 +6,28 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor, Sam2Model, Sam2Processor
+from transformers import Sam2Model, Sam2Processor
 from locate_anything import LocateAnythingGrounder
 
 
 class GroundedSegmenter:
-    def __init__(self, gdino="IDEA-Research/grounding-dino-base", sam="facebook/sam2.1-hiera-small", locate_model="nvidia/LocateAnything-3B", device=None):
-        self.gdino_name = gdino
+    def __init__(self, sam="facebook/sam2.1-hiera-small", locate_model="nvidia/LocateAnything-3B", device=None):
         self.sam_name = sam
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.loc = LocateAnythingGrounder(model=locate_model, device=self.dev)
-        self.dp = None
-        self.dm = None
         self.sp = None
         self.sm = None
 
     def load(self):
-        if self.dm is None:
-            self.dp = AutoProcessor.from_pretrained(self.gdino_name)
-            self.dm = AutoModelForZeroShotObjectDetection.from_pretrained(self.gdino_name, device_map="auto" if self.dev == "cuda" else None)
-            if self.dev != "cuda":
-                self.dm.to(self.dev)
         if self.sm is None:
             self.sp = Sam2Processor.from_pretrained(self.sam_name)
             self.sm = Sam2Model.from_pretrained(self.sam_name, device_map="auto" if self.dev == "cuda" else None)
             if self.dev != "cuda":
                 self.sm.to(self.dev)
 
-    def detect(self, frame, query, box_thr=0.28, text_thr=0.2):
-        boxes, scores, answer = self.loc.detect(frame, query)
-        if boxes:
-            texts = [query.strip().lower()] * len(boxes)
-            return boxes, scores, texts
-        self.load()
-        img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        labels = [[query.strip().lower()]]
-        inp = self.dp(images=img, text=labels, return_tensors="pt").to(self.dm.device)
-        with torch.no_grad():
-            out = self.dm(**inp)
-        res = self.dp.post_process_grounded_object_detection(
-            out,
-            inp.input_ids,
-            threshold=box_thr,
-            text_threshold=text_thr,
-            target_sizes=[(frame.shape[0], frame.shape[1])],
-        )[0]
-        boxes = []
-        scores = []
-        texts = []
-        for box, score, text in zip(res["boxes"], res["scores"], res.get("text_labels", res.get("labels", []))):
-            boxes.append([float(x) for x in box.tolist()])
-            scores.append(float(score))
-            texts.append(str(text))
+    def detect(self, frame, query):
+        boxes, scores, _ = self.loc.detect(frame, query)
+        texts = [query.strip().lower()] * len(boxes)
         return boxes, scores, texts
 
     def segment(self, frame, boxes):

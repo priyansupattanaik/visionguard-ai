@@ -18,12 +18,12 @@ setup_cache()
 
 
 class VisionGuardPipeline:
-    def __init__(self, out_dir="output", yolo="yolo11s.pt", clip_model="google/siglip2-base-patch16-224", event_model="microsoft/xclip-base-patch32", locate_model="nvidia/LocateAnything-3B", gdino="IDEA-Research/grounding-dino-base", sam="facebook/sam2.1-hiera-small"):
+    def __init__(self, out_dir="output", yolo="yolo11s.pt", clip_model="google/siglip2-base-patch16-224", event_model="microsoft/xclip-base-patch32", locate_model="nvidia/LocateAnything-3B", sam="facebook/sam2.1-hiera-small"):
         self.out_dir = out_dir
         self.trk = ObjectTracker(model=yolo)
         self.enc = SearchEncoder(model=clip_model)
         self.events = EventTagger(model=event_model)
-        self.seg = GroundedSegmenter(gdino=gdino, sam=sam, locate_model=locate_model)
+        self.seg = GroundedSegmenter(sam=sam, locate_model=locate_model)
         self.idx = None
         self.run_dir = None
         self.clip = None

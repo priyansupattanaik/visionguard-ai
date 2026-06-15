@@ -26,7 +26,7 @@ Full project documentation:
 ## What changed
 
 - Added live indexing preview during scan
-- Added Grounding DINO + SAM2 segmentation on matched clips
+- Added LocateAnything + SAM2 segmentation on matched clips
 - Added per-match export with CSV/JSON/HTML/ZIP outputs
 - Reduced repeated downloads by supporting Drive-backed cache in Colab
 - Removed clip extraction from the initial query path so search returns timestamps first and generates clips only when you open or export a match
@@ -99,7 +99,7 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 ### Notes
 
 - CPU Spaces will work but will be slow for segmentation.
-- GPU Spaces are strongly recommended for Grounding DINO + SAM2.
+- GPU Spaces are strongly recommended for LocateAnything + SAM2.
 - If you want tighter version control, add `sdk_version` in the YAML block at the top of this file.
 
 ## App Flow
