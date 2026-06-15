@@ -158,7 +158,7 @@ It uses:
 - query-object overlap boosts
 - deduplication of near-identical windows
 
-This layer turns indexed windows into ranked matches.
+This layer turns indexed frames and aggregated windows into ranked matches.
 
 ### 5A.5 Localization and Segmentation Layer
 
@@ -791,12 +791,6 @@ This is a frame-first retrieval pipeline.
 
 It is more precise than the older coarse segment-only retrieval path.
 
-1. The query text is embedded with SigLIP2.
-2. `turbovec` returns the top candidate sampled frames by vector similarity.
-3. Query-object overlap adjusts the score.
-4. Nearby frames are clustered into clip candidates.
-5. Florence-2 verifies the top candidates and produces better natural-language descriptions.
-
 Search code is in [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:179).
 
 Why this design:
@@ -954,7 +948,7 @@ Why SigLIP2:
 
 - strong vision-text retrieval
 - lighter than large VLM rerankers
-- practical for indexing many windows
+- practical for indexing many sampled frames
 
 ### 7.5A Florence-2
 
@@ -987,7 +981,7 @@ Why chosen:
 
 - purpose-built Python vector index
 - supports stable external ids through `IdMapIndex`
-- lower search overhead than rescoring every segment in Python
+- lower search overhead than rescoring every frame or segment in Python
 
 Alternatives:
 
@@ -998,7 +992,7 @@ Alternatives:
 Why it fits this repo:
 
 - the pipeline already creates one embedding per searchable frame and segment
-- segment ids need to stay stable across retrieval and export
+- frame ids and segment ids need to stay stable across retrieval and export
 - it improves query latency without changing the grounding stage
 
 ### 7.7 LocateAnything-3B
@@ -1398,10 +1392,10 @@ A: It pays the analysis cost once and allows repeated queries cheaply afterward.
 ### 18.2 Architecture
 
 Q: What are the major stages of the pipeline?  
-A: Video scan, frame sampling, tracking, retrieval embedding, window indexing, query search, clip prep, grounding, segmentation, export.
+A: Video scan, frame sampling, tracking, embedding, frame indexing, query expansion, fast retrieval, candidate clustering, Florence verification, clip prep, grounding, segmentation, export.
 
 Q: Why use multiple models instead of one large model?  
-A: Each part solves a different subproblem more efficiently: tracking, retrieval, grounding, segmentation.
+A: Each part solves a different subproblem more efficiently: scan-time detection, fast retrieval, top-k verification, grounding, and segmentation.
 
 Q: Why not process every frame densely?  
 A: It is too expensive for Colab and would make indexing much slower.
@@ -1413,6 +1407,9 @@ A: Fast object detection and useful live preview overlays.
 
 Q: Why use SigLIP2?  
 A: It provides text-image retrieval embeddings for semantic search.
+
+Q: Why use Florence-2?  
+A: It acts as a second-stage verifier and description model on top candidates, improving difficult semantic queries without slowing the full scan stage too much.
 
 Q: Why use LocateAnything-3B?  
 A: It improves open-vocabulary grounding on matched frames from natural-language phrases.
@@ -1437,7 +1434,7 @@ A: It can produce incorrect retrievals or weak event matches. No honest open-wor
 ### 18.5 Optimization
 
 Q: What optimizations are used?  
-A: Frame sampling, scan-first indexing, averaged window embeddings, background clip trimming, on-demand segmentation, caching, atomic video writes.
+A: Frame sampling, scan-first indexing, frame-first ANN retrieval with turbovec, selective Florence verification, background clip trimming, on-demand segmentation, caching, and atomic video writes.
 
 Q: Why is the first clip shown faster now?  
 A: Because only the first result is prepared immediately and the others trim in background.
@@ -1599,10 +1596,19 @@ Convert sampled windows into searchable units with:
 
 ### Stage 3. Natural-language search
 
-Convert the query into a text embedding and rank indexed windows by:
+Convert the query into a text embedding and rank indexed content by:
 
 - semantic similarity
 - object presence clues
+
+In the current repo, this stage is more precisely:
+
+- query expansion
+- query embedding with SigLIP2
+- frame ANN retrieval with turbovec
+- lightweight object-aware reranking
+- temporal clustering
+- Florence-2 verification
 
 ### Stage 4. Candidate refinement
 
