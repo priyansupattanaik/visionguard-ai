@@ -7,8 +7,10 @@ from cache_utils import setup_cache
 from pipeline import VisionGuardPipeline
 
 setup_cache()
-warnings.filterwarnings("ignore", message="The parameters have been moved from the Blocks constructor to the launch\\(\\) method in Gradio 6\\.0: theme, css.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="gradio.*")
+warnings.filterwarnings("ignore", category=UserWarning, message="The parameters have been moved from the Blocks constructor to the launch\\(\\) method in Gradio 6\\.0: theme, css.*")
 pipe = VisionGuardPipeline()
+theme = gr.themes.Soft(primary_hue="cyan", secondary_hue="slate")
 css = """
 .gradio-container{max-width:1240px!important}
 .gradio-container,.gradio-container *{box-sizing:border-box}
@@ -43,7 +45,7 @@ def _ans(q, rows):
         out.append("no strong matches found")
         return "\n".join(out)
     for i, x in enumerate(rows, 1):
-        out.append(f"{i}. `{x['start']:.2f}s - {x['end']:.2f}s`")
+        out.append(f"{i}. `best frame {x.get('peak_ts', x['start']):.2f}s | clip {x['start']:.2f}s - {x['end']:.2f}s`")
         out.append(f"   {x['summary']}")
     return "\n".join(out)
 
@@ -71,7 +73,7 @@ def find_query(q):
         return "enter a natural-language query", "", [], None, [], blank_pick, blank_one, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
     hits = pipe.search(q.strip(), top_k=4)
     seg = pipe.prepare_hits(hits, q.strip())
-    rows = [[i, round(x["score"], 4), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])] for i, x in enumerate(seg, 1)]
+    rows = [[i, round(x["score"], 4), round(x.get("peak_ts", x["start"]), 2), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])] for i, x in enumerate(seg, 1)]
     ans = _ans(q.strip(), seg)
     choices = [x["label"] for x in seg]
     first = seg[0]["raw_clip"] if seg else None
@@ -96,7 +98,7 @@ def export_selected(picks, q, hits):
     return gr.update(visible=True, value=zipf), gr.update(visible=True, value=html), gr.update(visible=True, value=csv)
 
 
-with gr.Blocks(title="VisionGuard AI", css=css, theme=gr.themes.Soft(primary_hue="cyan", secondary_hue="slate")) as demo:
+with gr.Blocks(title="VisionGuard AI", css=css, theme=theme) as demo:
     gr.HTML(
         """
 <div class="hero">
@@ -126,7 +128,7 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=gr.themes.Soft(primary_hue
 
         with gr.Column(scale=2, elem_classes="panel result-stack"):
             answer = gr.Markdown(elem_classes="tight-md")
-            table = gr.Dataframe(headers=["rank", "score", "start", "end", "summary", "objects"], interactive=False, wrap=True)
+            table = gr.Dataframe(headers=["rank", "score", "moment", "start", "end", "summary", "objects"], interactive=False, wrap=True)
             pick_one = gr.Dropdown(label="view one match", choices=[], value=None)
             clip = gr.Video(label="selected match clip", elem_classes="hidden-empty")
             clips = gr.Files(label="all matched clips")

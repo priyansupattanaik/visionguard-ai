@@ -29,6 +29,7 @@ class VisionGuardPipeline:
         self.rep = None
         self.last_hits = []
         self.search_idx = SegmentVectorIndex(bit_width=4)
+        self.frame_idx = SegmentVectorIndex(bit_width=4)
         self.pool = ThreadPoolExecutor(max_workers=2)
         self.raw_jobs = {}
         self.seg_jobs = {}
@@ -94,9 +95,108 @@ class VisionGuardPipeline:
         for k, rows in m.items():
             if any(x in q for x in rows):
                 out.add(k)
+        if any(x in q for x in [" accident ", " collision ", " crash ", " hit-and-run ", " pileup "]):
+            out |= {"car", "truck", "bus", "motorcycle", "bicycle"}
         return sorted(out)
 
-    def index_video_iter(self, video, sample_sec=1.5, win_sec=6.0):
+    def _query_variants(self, q):
+        ql = q.strip().lower()
+        out = [ql]
+        groups = {
+            "accident": [
+                "traffic accident",
+                "vehicle collision",
+                "car crash",
+                "vehicles hitting each other",
+            ],
+            "collision": [
+                "traffic collision",
+                "vehicle crash",
+                "cars colliding",
+            ],
+            "crash": [
+                "vehicle crash",
+                "traffic accident",
+                "cars hitting each other",
+            ],
+            "fight": [
+                "people fighting",
+                "physical fight",
+                "person attacking another person",
+            ],
+            "fall": [
+                "person falling",
+                "person on the ground after a fall",
+                "human fall incident",
+            ],
+            "crowd": [
+                "crowd of people",
+                "many people gathered together",
+                "group of people",
+            ],
+            "loitering": [
+                "person standing around",
+                "person waiting near one place",
+                "person staying in the same area",
+            ],
+        }
+        for key, vals in groups.items():
+            if key in ql:
+                out.extend(vals)
+        seen = set()
+        uniq = []
+        for item in out:
+            if item not in seen:
+                uniq.append(item)
+                seen.add(item)
+        return uniq
+
+    def _embed_query(self, q):
+        vecs = [self.enc.embed_text(x) for x in self._query_variants(q)]
+        mix = np.mean(vecs, axis=0).astype(np.float32)
+        den = max(np.linalg.norm(mix), 1e-6)
+        return mix / den
+
+    def _frame_summary(self, q, peak_ts, objs):
+        label = ", ".join(objs) if objs else "no tracked objects"
+        return f"best matching sampled frame at {peak_ts:.2f}s | detected: {label}"
+
+    def _cluster_frame_hits(self, rows, top_k, gap_sec):
+        rows = sorted(rows, key=lambda x: x["ts"])
+        clusters = []
+        for row in rows:
+            if not clusters or row["ts"] - clusters[-1][-1]["ts"] > gap_sec:
+                clusters.append([row])
+            else:
+                clusters[-1].append(row)
+        out = []
+        for chunk in clusters:
+            peak = max(chunk, key=lambda x: x["score"])
+            objs = sorted({obj for row in chunk for obj in row["objects"]})
+            out.append({
+                "query": peak["query"],
+                "score": max(x["score"] for x in chunk),
+                "base_score": peak["base_score"],
+                "start": max(0.0, chunk[0]["ts"] - gap_sec),
+                "end": chunk[-1]["ts"] + gap_sec,
+                "peak_ts": peak["ts"],
+                "frame_path": peak["frame_path"],
+                "objects": objs,
+                "tracks": sorted({tid for row in chunk for tid in row["tracks"]}),
+                "tags": [],
+                "summary": self._frame_summary(peak["query"], peak["ts"], objs),
+            })
+        out = sorted(out, key=lambda x: x["score"], reverse=True)
+        dedup = []
+        for row in out:
+            if len(dedup) >= top_k:
+                break
+            if any(abs(row["peak_ts"] - x["peak_ts"]) < gap_sec for x in dedup):
+                continue
+            dedup.append(row)
+        return dedup
+
+    def index_video_iter(self, video, sample_sec=0.75, win_sec=4.5):
         self._new_run(video)
         self.trk.reset()
         cap = cv2.VideoCapture(video)
@@ -147,7 +247,14 @@ class VisionGuardPipeline:
             emb = self.enc.embed_frame(frame)
             frame_path = os.path.join(self.run_dir, "frames", f"f_{i:06d}.jpg")
             cv2.imwrite(frame_path, frame)
-            frames.append({"frame": i, "ts": ts, "emb": emb, "frame_path": frame_path, "meta": meta})
+            frames.append({
+                "frame_id": np.uint64(len(frames)),
+                "frame": i,
+                "ts": ts,
+                "emb": emb,
+                "frame_path": frame_path,
+                "meta": meta,
+            })
             yield {"kind": "preview", "image": self._preview(frame, tracks, ts), "status": f"scanning {ts:.1f}s / {dur:.1f}s"}
             i += 1
         cap.release()
@@ -185,7 +292,25 @@ class VisionGuardPipeline:
             "win_sec": win_sec,
             "segments": len(segs),
         }
-        self.idx = {"video": video, "meta": meta, "segments": segs}
+        self.idx = {
+            "video": video,
+            "meta": meta,
+            "frames": [
+                {
+                    "frame_id": int(x["frame_id"]),
+                    "frame": x["frame"],
+                    "ts": x["ts"],
+                    "frame_path": x["frame_path"],
+                    "objects": sorted(x["meta"]["objects"].keys()),
+                    "tracks": x["meta"]["tracks"],
+                }
+                for x in frames
+            ],
+            "segments": segs,
+        }
+        frame_vecs = np.ascontiguousarray(np.stack([x["emb"] for x in frames]).astype(np.float32)) if frames else np.zeros((0, 0), dtype=np.float32)
+        frame_ids = np.asarray([x["frame_id"] for x in frames], dtype=np.uint64) if frames else np.zeros((0,), dtype=np.uint64)
+        self.frame_idx.build(frame_vecs, frame_ids, path=os.path.join(self.run_dir, "reports", "frame_index.tvim"))
         seg_vecs = np.ascontiguousarray(np.stack([x["emb"] for x in segs]).astype(np.float32)) if segs else np.zeros((0, 0), dtype=np.float32)
         seg_ids = np.asarray([x["seg_id"] for x in segs], dtype=np.uint64) if segs else np.zeros((0,), dtype=np.uint64)
         self.search_idx.build(seg_vecs, seg_ids, path=os.path.join(self.run_dir, "reports", "segment_index.tvim"))
@@ -193,7 +318,20 @@ class VisionGuardPipeline:
         self.rep.write_json(
             path,
             {
-                "meta": {**self.idx["meta"], "retriever": self.search_idx.backend},
+                "meta": {
+                    **self.idx["meta"],
+                    "retriever": self.frame_idx.backend,
+                    "segment_retriever": self.search_idx.backend,
+                },
+                "frames": [
+                    {
+                        "frame_id": x["frame_id"],
+                        "ts": x["ts"],
+                        "frame_path": x["frame_path"],
+                        "objects": x["objects"],
+                    }
+                    for x in self.idx["frames"]
+                ],
                 "segments": [
                     {
                         "seg_id": int(x["seg_id"]),
@@ -208,19 +346,61 @@ class VisionGuardPipeline:
                 ],
             },
         )
-        yield {"kind": "done", "meta": {**self.idx["meta"], "retriever": self.search_idx.backend}, "index_json": path}
+        yield {
+            "kind": "done",
+            "meta": {
+                **self.idx["meta"],
+                "retriever": self.frame_idx.backend,
+                "segment_retriever": self.search_idx.backend,
+            },
+            "index_json": path,
+        }
 
     def search(self, q, top_k=4):
-        qv = self.enc.embed_text(q)
+        qv = self._embed_query(q)
         ql = q.strip().lower()
         qobjs = self._q_objs(q)
+        frames = self.idx.get("frames", [])
+        frame_map = {int(x["frame_id"]): x for x in frames}
+        fetch_k = min(max(top_k * 12, 36), len(frames))
+        frame_scores, frame_ids = self.frame_idx.search(qv, fetch_k)
+        rows = []
+        for base_score, frame_id in zip(frame_scores, frame_ids):
+            row = frame_map.get(int(frame_id))
+            if row is None:
+                continue
+            score = float(base_score)
+            sobj = set(row["objects"])
+            if qobjs:
+                hit = len(sobj & set(qobjs))
+                if hit:
+                    score += 0.1 * hit
+                else:
+                    score -= 0.08
+            if any(x in ql for x in ["accident", "collision", "crash"]) and sobj & {"car", "truck", "bus", "motorcycle", "bicycle"}:
+                score += 0.08
+            if "sitting" in ql and "person" in sobj:
+                score += 0.05
+            rows.append({
+                "query": q,
+                "score": score,
+                "base_score": float(base_score),
+                "ts": row["ts"],
+                "frame_path": row["frame_path"],
+                "objects": row["objects"],
+                "tracks": row["tracks"],
+            })
+        rows = [x for x in sorted(rows, key=lambda x: x["score"], reverse=True) if x["score"] >= 0.16]
+        out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
+        if out:
+            return out
         n = len(self.idx["segments"])
         if n == 0:
             return []
         seg_map = {int(x["seg_id"]): x for x in self.idx["segments"]}
         fetch_k = min(max(top_k * 8, 24), n)
         base_scores, seg_ids = self.search_idx.search(qv, fetch_k)
-        rows = []
+        seg_rows = []
         for base_score, seg_id in zip(base_scores, seg_ids):
             seg = seg_map.get(int(seg_id))
             if seg is None:
@@ -232,27 +412,30 @@ class VisionGuardPipeline:
                 if hit:
                     score += 0.12 * hit
                 else:
-                    score -= 0.12
+                    score -= 0.1
+            if any(x in ql for x in ["accident", "collision", "crash"]) and sobj & {"car", "truck", "bus", "motorcycle", "bicycle"}:
+                score += 0.08
             if "sitting" in ql and "person" in sobj:
                 score += 0.05
-            rows.append({
+            seg_rows.append({
                 "query": q,
                 "score": score,
                 "base_score": float(base_score),
                 "start": seg["start"],
                 "end": seg["end"],
+                "peak_ts": seg["mid"],
                 "frame_path": seg["frame_path"],
                 "objects": seg["objects"],
                 "tracks": seg["tracks"],
                 "tags": seg["tags"],
-                "summary": ", ".join(seg["objects"]) if seg["objects"] else "no tracked objects",
+                "summary": self._frame_summary(q, seg["mid"], seg["objects"]),
             })
-        rows = sorted(rows, key=lambda x: x["score"], reverse=True)
+        seg_rows = sorted(seg_rows, key=lambda x: x["score"], reverse=True)
         out = []
-        for row in rows:
+        for row in seg_rows:
             if len(out) >= top_k:
                 break
-            if any(abs(row["start"] - x["start"]) < 3 for x in out):
+            if any(abs(row["peak_ts"] - x["peak_ts"]) < 3 for x in out):
                 continue
             if row["score"] < 0.18:
                 continue
