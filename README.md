@@ -122,3 +122,4 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 - Search now uses frame-first retrieval with semantic query expansion, object-aware reranking, and `Florence-2` verification on top candidates.
 - Frame and segment embeddings are persisted to local `turbovec` indexes per scan, so repeated queries use the vector index instead of rescoring everything in Python.
 - The UI writes a short answer block below the query and shows matched sampled frames immediately.
+- If no strong semantic match is found, the app now falls back to nearest object-backed or low-confidence frame matches instead of showing a blank result area.

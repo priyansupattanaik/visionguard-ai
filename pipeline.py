@@ -81,9 +81,9 @@ class VisionGuardPipeline:
         return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
 
     def _q_objs(self, q):
-        q = f" {q.strip().lower()} "
+        q = f" {self._normalize_query(q)} "
         m = {
-            "person": [" person ", " people ", " man ", " woman ", " human "],
+            "person": [" person ", " people ", " peoples ", " persons ", " man ", " woman ", " human "],
             "car": [" car ", " vehicle ", " sedan "],
             "truck": [" truck ", " lorry "],
             "bus": [" bus "],
@@ -101,8 +101,25 @@ class VisionGuardPipeline:
             out |= {"car", "truck", "bus", "motorcycle", "bicycle"}
         return sorted(out)
 
+    def _normalize_query(self, q):
+        q = q.strip().lower()
+        repl = {
+            "peoples": "people",
+            "persons": "person",
+            "human beings": "people",
+            "bike accident": "motorcycle accident",
+            "bikes": "bicycle",
+            "cycles": "bicycle",
+            "cars": "car",
+            "trucks": "truck",
+            "buses": "bus",
+        }
+        for src, dst in repl.items():
+            q = q.replace(src, dst)
+        return " ".join(q.split())
+
     def _query_variants(self, q):
-        ql = q.strip().lower()
+        ql = self._normalize_query(q)
         out = [ql]
         groups = {
             "accident": [
@@ -216,6 +233,36 @@ class VisionGuardPipeline:
                 continue
             dedup.append(row)
         return dedup
+
+    def _fallback_object_hits(self, q, top_k):
+        qobjs = set(self._q_objs(q))
+        if not qobjs:
+            return []
+        rows = []
+        for row in self.idx.get("frames", []):
+            sobj = set(row["objects"])
+            hit = len(sobj & qobjs)
+            if not hit:
+                continue
+            score = 0.2 + 0.08 * hit
+            rows.append({
+                "query": q,
+                "score": score,
+                "base_score": score,
+                "ts": row["ts"],
+                "frame_path": row["frame_path"],
+                "objects": row["objects"],
+                "tracks": row["tracks"],
+            })
+        rows = sorted(rows, key=lambda x: x["score"], reverse=True)
+        if not rows:
+            return []
+        gap = max(self.idx["meta"]["sample_sec"] * 1.25, 1.0)
+        hits = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=gap)
+        for hit in hits:
+            hit["summary"] = f"object-matched sampled frame at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects'])}"
+            hit["low_confidence"] = True
+        return hits
 
     def index_video_iter(self, video, sample_sec=0.75, win_sec=4.5):
         self._new_run(video)
@@ -380,8 +427,9 @@ class VisionGuardPipeline:
         }
 
     def search(self, q, top_k=4):
+        q = self._normalize_query(q)
         qv = self._embed_query(q)
-        ql = q.strip().lower()
+        ql = q
         qobjs = self._q_objs(q)
         frames = self.idx.get("frames", [])
         frame_map = {int(x["frame_id"]): x for x in frames}
@@ -413,10 +461,21 @@ class VisionGuardPipeline:
                 "objects": row["objects"],
                 "tracks": row["tracks"],
             })
-        rows = [x for x in sorted(rows, key=lambda x: x["score"], reverse=True) if x["score"] >= 0.16]
+        ranked_rows = sorted(rows, key=lambda x: x["score"], reverse=True)
+        rows = [x for x in ranked_rows if x["score"] >= 0.14]
         out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
         if out:
             return self._verify_rows(out, q, top_n=max(top_k * 2, 4))[:top_k]
+        obj_hits = self._fallback_object_hits(q, top_k)
+        if obj_hits:
+            return obj_hits
+        if ranked_rows:
+            weak = self._cluster_frame_hits(ranked_rows[: max(top_k * 3, 8)], top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
+            for hit in weak:
+                hit["summary"] = f"low-confidence visual match at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects']) if hit['objects'] else 'no tracked objects'}"
+                hit["low_confidence"] = True
+            if weak:
+                return weak
         n = len(self.idx["segments"])
         if n == 0:
             return []

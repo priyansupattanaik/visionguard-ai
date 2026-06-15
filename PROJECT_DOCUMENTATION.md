@@ -563,6 +563,18 @@ Each final row contains:
 
 Those rows are what the UI table and answer block display.
 
+### Step 10. Honest fallback behavior
+
+If no strong semantic match clears the normal threshold:
+
+- the backend first tries object-backed fallback results
+- if that still fails, it returns the nearest low-confidence visual matches
+
+Why:
+
+- the UI should not appear broken or blank when the query is close to something present in the video
+- low-confidence fallback is marked clearly so it is not misrepresented as a strong hit
+
 ### 5B.6 What Happens Right After Search
 
 Search results are converted into hit rows in `prepare_hits(...)`.

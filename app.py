@@ -49,12 +49,19 @@ def _ans(q, rows):
         return "\n".join(out)
     for i, x in enumerate(rows, 1):
         out.append(f"{i}. `best frame {x.get('peak_ts', x['start']):.2f}s | clip {x['start']:.2f}s - {x['end']:.2f}s`")
-        out.append(f"   {x['summary']}")
+        prefix = "low confidence: " if x.get("low_confidence") else ""
+        out.append(f"   {prefix}{x['summary']}")
     return "\n".join(out)
 
 
 def _gallery(rows):
-    return [(x["frame_path"], f"{x['label']} | {x['summary']}") for x in rows if x.get("frame_path")]
+    out = []
+    for x in rows:
+        if not x.get("frame_path"):
+            continue
+        prefix = "low confidence | " if x.get("low_confidence") else ""
+        out.append((x["frame_path"], f"{x['label']} | {prefix}{x['summary']}"))
+    return out
 
 
 def scan_only(video):
@@ -83,7 +90,12 @@ def find_query(q):
     ans = _ans(q.strip(), seg)
     choices = [x["label"] for x in seg]
     gal = _gallery(seg)
-    note = "### matched frames\n\nThe gallery below shows the top sampled frames for your query. Select any rows you want to export as clips and reports." if seg else ""
+    if not seg:
+        note = "### matched frames\n\nNo strong frame matches were found for this query."
+    elif any(x.get("low_confidence") for x in seg):
+        note = "### matched frames\n\nThe gallery below shows the nearest available sampled frames. These results are low confidence, so review them carefully before export."
+    else:
+        note = "### matched frames\n\nThe gallery below shows the top sampled frames for your query. Select any rows you want to export as clips and reports."
     return "matches ready", ans, rows, gr.update(choices=choices, value=choices[:1]), gal, note, q.strip(), seg, gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
 
 
