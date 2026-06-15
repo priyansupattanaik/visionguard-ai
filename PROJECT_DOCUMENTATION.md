@@ -43,9 +43,10 @@ The current app flow is:
 5. Click `step 2: find matches`.
 6. The system searches indexed sampled frames, clusters them into clip candidates, verifies the top candidates, and returns top time ranges.
 7. The UI shows the matched-frame gallery and timestamp table immediately.
-8. No clip is generated just to view a result.
-9. Clip generation, grounding, and segmentation happen only when selected results are exported.
-10. Selected clips and reports can be exported.
+8. When the query maps to a detector-supported class, the backend refines against real per-frame detections and renders boxed matched-frame previews.
+9. No clip is generated just to view a result.
+10. Clip generation, grounding, and segmentation happen only when selected results are exported.
+11. Selected clips and reports can be exported.
 
 ## 4. Core Design Decision
 
@@ -366,10 +367,11 @@ For each sampled frame:
 
 1. YOLO11m + BoT-SORT produce tracked objects.
 2. Object counts and ids are collected.
-3. A live preview overlay is drawn.
-4. SigLIP2 So400m creates a frame embedding.
-5. The raw frame is saved to `output/.../frames`.
-6. A preview event is yielded back to Gradio.
+3. Obvious low-content intro or title-card frames without detections are skipped.
+4. A live preview overlay is drawn.
+5. SigLIP2 So400m creates a frame embedding.
+6. The raw frame is saved to `output/.../frames`.
+7. A preview event is yielded back to Gradio.
 
 That yield behavior is important.
 
@@ -407,6 +409,7 @@ Each indexed frame stores:
 - representative frame path
 - object names
 - track ids
+- per-frame detection boxes and confidences for tracked objects
 
 Each indexed window stores:
 
@@ -559,6 +562,27 @@ Example:
 - `yellow car` should prefer frames tagged as `yellow car`
 - a frame that only contains a generic `car` but no yellow-looking car should not receive the same boost
 
+### Step 6A. Detector-backed object refinement
+
+If the query maps to supported detector classes such as:
+
+- `person`
+- `car`
+- `truck`
+- `bus`
+- `motorcycle`
+- `bicycle`
+- `umbrella`
+
+the backend tries detector-backed frame hits before falling back to weak semantic matches.
+
+It uses:
+
+- stored scan-time detections
+- a focused low-threshold detector pass on saved sampled frames when needed
+
+This reduces false positives from title cards or empty frames and also gives real boxes that can be drawn in the matched-frame gallery.
+
 ### Step 7. Temporal clustering
 
 Nearby high-scoring sampled frames are grouped into one clip candidate.
@@ -604,6 +628,7 @@ Important current detail:
 
 - if the query contains both a color and a supported vehicle class, object fallback now requires a matching appearance tag such as `yellow car`
 - it does not fall back to just any `car` frame for a `yellow car` query
+- if the query maps to a detector-supported class, the runtime now tries detector-backed frame hits before allowing low-confidence visual fallback
 
 ### 5B.6 What Happens Right After Search
 
@@ -1136,6 +1161,7 @@ This is the main optimization concept of the project.
 - object-aware retrieval
 - coarse color-aware vehicle retrieval for queries like `yellow car`
 - representative-frame retrieval for top matches
+- boxed matched-frame previews for detector-backed queries
 - localization and segmentation on matched clips
 - selective export
 - Colab demo workflow

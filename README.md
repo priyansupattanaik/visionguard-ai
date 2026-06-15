@@ -36,6 +36,8 @@ Full project documentation:
 - Removed clip extraction from the initial query path so search returns matched frames and timestamps first and generates clips only when you export selected matches
 - Removed noisy event-tag injection from runtime search to reduce false positives
 - Added query normalization plus color-aware vehicle matching for queries such as `yellow car` or `white bus`
+- Added detector-backed query refinement for detectable objects such as `person`, `car`, and `umbrella`, so matched frames prefer real object hits over weak semantic fallbacks
+- Added boxed matched-frame previews in the gallery and skipped obvious low-content intro/title-card frames during scan
 
 ## Local run
 
@@ -125,4 +127,5 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 - Vehicle queries with color words now use coarse per-frame appearance tags, so `yellow car` is not treated the same as any generic `car`.
 - Frame and segment embeddings are persisted to local `turbovec` indexes per scan, so repeated queries use the vector index instead of rescoring everything in Python.
 - The UI writes a short answer block below the query and shows matched sampled frames immediately.
+- The matched-frame gallery now uses boxed preview frames when detector-backed matches are available.
 - If no strong semantic match is found, the app now falls back to nearest object-backed or low-confidence frame matches instead of showing a blank result area.

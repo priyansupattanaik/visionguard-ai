@@ -26,6 +26,19 @@ class ObjectTracker:
         self.m = YOLO(self.model_name)
         self.m.to(self.dev)
 
+    def class_ids(self, names):
+        self.load()
+        want = {str(x).strip().lower() for x in names}
+        out = []
+        for ci, name in self.m.names.items():
+            if str(name).strip().lower() in want:
+                out.append(int(ci))
+        return out
+
+    def names(self):
+        self.load()
+        return {int(k): str(v) for k, v in self.m.names.items()}
+
     def track(self, frame, cls=None):
         self.load()
         res = self.m.track(
@@ -48,6 +61,31 @@ class ObjectTracker:
             for tid, box, cf, ci in zip(ids, boxes, confs, clss):
                 out.append({
                     "id": int(tid),
+                    "box": [round(x, 2) for x in box],
+                    "conf": round(float(cf), 4),
+                    "cls": int(ci),
+                    "name": self.m.names.get(int(ci), str(ci)),
+                })
+        return out
+
+    def detect(self, frame, cls=None, conf=None):
+        self.load()
+        res = self.m.predict(
+            frame,
+            verbose=False,
+            conf=self.conf if conf is None else conf,
+            imgsz=self.imgsz,
+            classes=cls,
+        )
+        out = []
+        for r in res:
+            if r.boxes is None:
+                continue
+            boxes = r.boxes.xyxy.cpu().tolist()
+            confs = r.boxes.conf.cpu().tolist()
+            clss = r.boxes.cls.int().cpu().tolist()
+            for box, cf, ci in zip(boxes, confs, clss):
+                out.append({
                     "box": [round(x, 2) for x in box],
                     "conf": round(float(cf), 4),
                     "cls": int(ci),

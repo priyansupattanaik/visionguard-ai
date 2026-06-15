@@ -89,9 +89,9 @@ class VisionGuardPipeline:
             return "gray"
         return best
 
-    def _appearance_tags(self, frame, tracks):
+    def _appearance_tags(self, frame, detections):
         tags = []
-        for t in tracks:
+        for t in detections:
             name = t["name"]
             if name not in {"car", "truck", "bus", "motorcycle", "bicycle"}:
                 continue
@@ -144,6 +144,16 @@ class VisionGuardPipeline:
         cv2.putText(out, f"{ts:.1f}s", (18, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
         return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
 
+    def _is_non_content_frame(self, frame, tracks):
+        if tracks:
+            return False
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        mean = float(gray.mean())
+        std = float(gray.std())
+        edges = cv2.Canny(gray, 80, 160)
+        edge_ratio = float((edges > 0).mean())
+        return mean < 40.0 and std < 28.0 and edge_ratio < 0.025
+
     def _q_objs(self, q):
         q = f" {self._normalize_query(q)} "
         m = {
@@ -156,6 +166,7 @@ class VisionGuardPipeline:
             "backpack": [" backpack ", " bag ", " parcel ", " package "],
             "suitcase": [" suitcase ", " luggage ", " parcel ", " package "],
             "handbag": [" handbag ", " purse ", " parcel ", " package "],
+            "umbrella": [" umbrella ", " parasol "],
         }
         out = set()
         for k, rows in m.items():
@@ -177,10 +188,153 @@ class VisionGuardPipeline:
             "cars": "car",
             "trucks": "truck",
             "buses": "bus",
+            "umbrellas": "umbrella",
         }
         for src, dst in repl.items():
             q = q.replace(src, dst)
         return " ".join(q.split())
+
+    def _query_detector_classes(self, q):
+        qobjs = self._q_objs(q)
+        if not qobjs:
+            return [], {}
+        class_ids = self.trk.class_ids(qobjs)
+        if not class_ids:
+            return [], {}
+        names = self.trk.names()
+        want = {str(x).strip().lower() for x in qobjs}
+        cls_to_name = {int(ci): str(names.get(int(ci), ci)).strip().lower() for ci in class_ids if str(names.get(int(ci), ci)).strip().lower() in want}
+        return class_ids, cls_to_name
+
+    def _is_strict_object_query(self, q):
+        tokens = set(self._normalize_query(q).split())
+        if not tokens:
+            return False
+        allowed = {
+            "person", "people", "man", "woman", "human",
+            "car", "truck", "bus", "vehicle", "sedan", "lorry",
+            "motorcycle", "motorbike", "bike", "bicycle", "cycle", "scooter",
+            "umbrella", "parasol",
+            "backpack", "bag", "suitcase", "luggage", "handbag", "purse", "parcel", "package",
+            "yellow", "white", "black", "gray", "red", "blue", "green", "orange", "brown",
+        }
+        return all(x in allowed for x in tokens)
+
+    def _matching_detections(self, row, qobjs, qcolors, cls_to_name=None):
+        out = []
+        wanted = {str(x).strip().lower() for x in qobjs}
+        cls_to_name = cls_to_name or {}
+        for det in row.get("detections", []):
+            name = str(det.get("name", "")).strip().lower()
+            if wanted and name not in wanted:
+                continue
+            color = det.get("color")
+            if qcolors:
+                if not color or color not in qcolors:
+                    continue
+            if cls_to_name and int(det.get("cls", -1)) in cls_to_name:
+                name = cls_to_name[int(det["cls"])]
+            out.append({
+                "name": name,
+                "box": det["box"],
+                "conf": det.get("conf", 0.0),
+                "cls": det.get("cls"),
+                "color": color,
+            })
+        return out
+
+    def _refine_detector_hits(self, q, top_k):
+        class_ids, cls_to_name = self._query_detector_classes(q)
+        if not class_ids:
+            return []
+        qobjs = set(self._q_objs(q))
+        qcolors = set(self._query_colors(q))
+        rows = []
+        for row in self.idx.get("frames", []):
+            matched = self._matching_detections(row, qobjs, qcolors, cls_to_name)
+            if not matched:
+                frame = cv2.imread(row["frame_path"])
+                if frame is None:
+                    continue
+                dets = self.trk.detect(frame, cls=class_ids, conf=0.12)
+                enriched = []
+                for det in dets:
+                    name = str(det["name"]).strip().lower()
+                    if name not in qobjs:
+                        continue
+                    color = None
+                    if name in {"car", "truck", "bus", "motorcycle", "bicycle"}:
+                        color = self._estimate_color(frame, det["box"])
+                    enriched.append({**det, "name": name, "color": color})
+                matched = self._matching_detections({"detections": enriched}, qobjs, qcolors, cls_to_name)
+            if not matched:
+                continue
+            best_conf = max(float(x.get("conf", 0.0)) for x in matched)
+            if best_conf < 0.2:
+                continue
+            score = 0.44 + 0.32 * best_conf + 0.05 * max(0, len(matched) - 1)
+            rows.append({
+                "query": q,
+                "score": score,
+                "base_score": score,
+                "ts": row["ts"],
+                "frame_path": row["frame_path"],
+                "objects": sorted({x["name"] for x in matched}),
+                "appearances": row.get("appearances", []),
+                "tracks": row["tracks"],
+                "matched_detections": matched,
+            })
+        rows = sorted(rows, key=lambda x: x["score"], reverse=True)
+        if not rows:
+            return []
+        hits = []
+        gap_sec = max(self.idx["meta"]["sample_sec"] * 1.25, 1.0)
+        for row in rows:
+            if len(hits) >= top_k:
+                break
+            if any(abs(row["ts"] - x["peak_ts"]) < gap_sec for x in hits):
+                continue
+            start, end = self._clip_bounds(row["ts"])
+            labels = sorted({x["name"] for x in row["matched_detections"]})
+            hits.append({
+                "query": q,
+                "score": row["score"],
+                "base_score": row["base_score"],
+                "start": start,
+                "end": end,
+                "peak_ts": row["ts"],
+                "frame_path": row["frame_path"],
+                "objects": labels,
+                "tracks": row["tracks"],
+                "appearances": row.get("appearances", []),
+                "matched_detections": row["matched_detections"],
+                "tags": [],
+                "summary": f"detector-matched sampled frame at {row['ts']:.2f}s | detected: {', '.join(labels)}",
+            })
+        return hits
+
+    def _render_match_preview(self, row):
+        src = row.get("frame_path")
+        if not src or not os.path.exists(src):
+            return src
+        out_dir = os.path.join(self.run_dir, "reports", "matched_frames")
+        os.makedirs(out_dir, exist_ok=True)
+        out_path = os.path.join(out_dir, f"match_{row.get('match_id', 0):02d}_{int(round(row.get('peak_ts', row.get('start', 0.0)) * 100)):06d}.jpg")
+        frame = cv2.imread(src)
+        if frame is None:
+            return src
+        detections = row.get("matched_detections", [])
+        if detections:
+            for det in detections:
+                x1, y1, x2, y2 = [int(round(v)) for v in det["box"]]
+                label = det["name"]
+                if det.get("color"):
+                    label = f"{det['color']} {label}"
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (20, 220, 245), 3)
+                cv2.putText(frame, label, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 220, 245), 2, cv2.LINE_AA)
+        cv2.putText(frame, f"{row.get('peak_ts', row.get('start', 0.0)):.2f}s", (18, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.imwrite(out_path, frame)
+        return out_path
 
     def _query_variants(self, q):
         ql = self._normalize_query(q)
@@ -378,7 +532,6 @@ class VisionGuardPipeline:
         dur = total / fps if fps else 0.0
         step = max(1, int(round(sample_sec * fps)))
         frames = []
-        hist = {}
         i = 0
         while True:
             ok, frame = cap.read()
@@ -388,32 +541,31 @@ class VisionGuardPipeline:
                 i += 1
                 continue
             ts = i / fps
-            tracks = self.trk.track(frame, cls=None)
+            detections = self.trk.detect(frame, cls=None, conf=0.18)
+            if self._is_non_content_frame(frame, detections):
+                i += 1
+                continue
             objs = {}
-            tids = []
-            move = 0
-            still = 0
-            for t in tracks:
-                name = t["name"]
+            det_rows = []
+            for det in detections:
+                name = det["name"]
                 objs[name] = objs.get(name, 0) + 1
-                tids.append(t["id"])
-                x1, y1, x2, y2 = t["box"]
-                cx = (x1 + x2) / 2
-                cy = (y1 + y2) / 2
-                old = hist.get(t["id"])
-                if old:
-                    dt = max(ts - old["ts"], 1e-6)
-                    d = ((cx - old["cx"]) ** 2 + (cy - old["cy"]) ** 2) ** 0.5 / dt
-                    if d > 45:
-                        move += 1
-                    else:
-                        still += 1
-                hist[t["id"]] = {"cx": cx, "cy": cy, "ts": ts}
+                color = None
+                if name in {"car", "truck", "bus", "motorcycle", "bicycle"}:
+                    color = self._estimate_color(frame, det["box"])
+                det_rows.append({
+                    "box": det["box"],
+                    "conf": det["conf"],
+                    "cls": det["cls"],
+                    "name": name,
+                    "color": color,
+                })
             meta = {
                 "objects": objs,
-                "tracks": sorted(set(tids)),
-                "appearances": self._appearance_tags(frame, tracks),
-                "still_people": still if objs.get("person", 0) else 0,
+                "tracks": [],
+                "appearances": self._appearance_tags(frame, det_rows),
+                "detections": det_rows,
+                "still_people": 0,
                 "person": objs.get("person", 0),
             }
             emb = self.enc.embed_frame(frame)
@@ -427,7 +579,7 @@ class VisionGuardPipeline:
                 "frame_path": frame_path,
                 "meta": meta,
             })
-            yield {"kind": "preview", "image": self._preview(frame, tracks, ts), "status": f"scanning {ts:.1f}s / {dur:.1f}s"}
+            yield {"kind": "preview", "image": self._preview(frame, det_rows, ts), "status": f"scanning {ts:.1f}s / {dur:.1f}s"}
             i += 1
         cap.release()
         block = max(1, int(round(win_sec / sample_sec)))
@@ -476,6 +628,7 @@ class VisionGuardPipeline:
                     "objects": sorted(x["meta"]["objects"].keys()),
                     "appearances": x["meta"]["appearances"],
                     "tracks": x["meta"]["tracks"],
+                    "detections": x["meta"]["detections"],
                 }
                 for x in frames
             ],
@@ -504,6 +657,7 @@ class VisionGuardPipeline:
                         "frame_path": x["frame_path"],
                         "objects": x["objects"],
                         "appearances": x["appearances"],
+                        "detections": x["detections"],
                     }
                     for x in self.idx["frames"]
                 ],
@@ -538,6 +692,11 @@ class VisionGuardPipeline:
         ql = q
         qobjs = self._q_objs(q)
         qcolors = set(self._query_colors(q))
+        detector_hits = self._refine_detector_hits(q, top_k)
+        if detector_hits:
+            return detector_hits
+        if qobjs and self._is_strict_object_query(q):
+            return []
         frames = self.idx.get("frames", [])
         frame_map = {int(x["frame_id"]): x for x in frames}
         fetch_k = min(max(top_k * 12, 36), len(frames))
@@ -653,6 +812,7 @@ class VisionGuardPipeline:
             row["frames"] = []
             row["segmented"] = False
             row["label"] = f"{i}. {hit.get('peak_ts', hit['start']):.2f}s"
+            row["display_frame_path"] = self._render_match_preview(row)
             out.append(row)
         self.last_hits = out
         return out

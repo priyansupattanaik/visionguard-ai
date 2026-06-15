@@ -57,10 +57,11 @@ def _ans(q, rows):
 def _gallery(rows):
     out = []
     for x in rows:
-        if not x.get("frame_path"):
+        frame_path = x.get("display_frame_path") or x.get("frame_path")
+        if not frame_path:
             continue
         prefix = "low confidence | " if x.get("low_confidence") else ""
-        out.append((x["frame_path"], f"{x['label']} | {prefix}{x['summary']}"))
+        out.append((frame_path, f"{x['label']} | {prefix}{x['summary']}"))
     return out
 
 
@@ -130,8 +131,6 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=theme) as demo:
             status = gr.Markdown("ready")
             live = gr.Image(label="live indexing preview", interactive=False, elem_classes="hidden-empty")
             info = gr.Markdown(elem_classes="tight-md")
-            gr.HTML("<div class='note-card'>After scanning finishes, the query box becomes active. In Colab, mount Drive once and use git pull for updates.</div>")
-
             query = gr.Textbox(label="query", placeholder="person sitting near gate, white car entering, fight near road, car accident", interactive=False)
             find_btn = gr.Button("step 2: find matches", interactive=False)
 
