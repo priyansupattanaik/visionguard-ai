@@ -10,7 +10,7 @@ The goal is:
 - index the video once
 - ask a natural-language query after scanning
 - return the most relevant timestamps, frames, and clip windows
-- show the matched clip
+- show the matched frames immediately
 - localize the queried object or region in matched clips
 - generate exportable clips and reports
 
@@ -485,6 +485,12 @@ The current query path is multi-stage.
 
 The raw user query is normalized to a simpler lowercase form.
 
+Examples:
+
+- `peoples` becomes `people`
+- `persons` becomes `person`
+- simple plural or wording variants are reduced to cleaner query forms
+
 ### Step 2. Query object inference
 
 The backend tries to infer expected tracked object classes from the query.
@@ -496,6 +502,18 @@ Examples:
 - `parcel` may map toward bag-like classes if present in the detector output
 
 This is a support signal, not the main retrieval model.
+
+### Step 2A. Query color inference
+
+If the query contains appearance words, the backend extracts them separately.
+
+Examples:
+
+- `yellow car`
+- `white bus`
+- `black motorcycle`
+
+These are used later during reranking and fallback.
 
 ### Step 3. Query expansion
 
@@ -533,6 +551,12 @@ The backend adjusts those raw scores using:
 - object overlap bonuses
 - object mismatch penalties
 - a few conservative phrase hints such as `sitting`
+- color-object appearance bonuses when the query contains both a color and a supported tracked vehicle class
+
+Example:
+
+- `yellow car` should prefer frames tagged as `yellow car`
+- a frame that only contains a generic `car` but no yellow-looking car should not receive the same boost
 
 ### Step 7. Temporal clustering
 
@@ -574,6 +598,11 @@ Why:
 
 - the UI should not appear broken or blank when the query is close to something present in the video
 - low-confidence fallback is marked clearly so it is not misrepresented as a strong hit
+
+Important current detail:
+
+- if the query contains both a color and a supported vehicle class, object fallback now requires a matching appearance tag such as `yellow car`
+- it does not fall back to just any `car` frame for a `yellow car` query
 
 ### 5B.6 What Happens Right After Search
 
@@ -735,6 +764,7 @@ What it contributes:
 - object names like `person`, `car`, `truck`
 - boxes
 - track ids
+- coarse appearance tags for supported vehicle crops such as `yellow car`, `white bus`, `gray truck`
 - live preview overlays during scanning
 
 What it does not solve:
@@ -1092,6 +1122,7 @@ This is the main optimization concept of the project.
 - averaged window embeddings
 - `turbovec` top-k vector retrieval instead of full Python rescoring over every frame or segment
 - Florence-2 verification only on top candidates
+- clip generation deferred until export
 - background clip trimming
 - background segmentation start for the first result
 - atomic clip writes to avoid broken partially-written MP4s
@@ -1103,6 +1134,7 @@ This is the main optimization concept of the project.
 - natural-language search over one scanned video
 - repeated queries after one scan
 - object-aware retrieval
+- coarse color-aware vehicle retrieval for queries like `yellow car`
 - representative-frame retrieval for top matches
 - localization and segmentation on matched clips
 - selective export
@@ -1139,6 +1171,7 @@ Short, concrete prompts work better than vague prompts.
 Better:
 
 - `white car near gate`
+- `yellow car near road`
 - `person sitting by wall`
 - `person near road`
 
@@ -1253,7 +1286,7 @@ Retrieval means searching indexed visual content using semantic similarity.
 
 Example:
 
-- query text embedding is compared with video-window embeddings
+- query text embedding is compared with indexed sampled frame embeddings
 
 ### Embedding
 
@@ -1270,6 +1303,21 @@ In this project, indexing stores:
 - timestamps
 - frame paths
 - embeddings
+- object names
+- appearance tags for supported tracked vehicle crops
+
+### Appearance Tagging
+
+Appearance tagging means attaching coarse visual attributes to a detected object crop.
+
+In this project it is currently used in a limited way:
+
+- mainly for supported tracked vehicle classes
+- mainly for coarse color terms such as `yellow`, `white`, `black`, `gray`, `red`, `blue`, `green`, `orange`, `brown`
+
+This is not a full fine-grained attribute classifier.
+
+It is a practical scan-time heuristic used to stop color-object queries from collapsing into generic object matches.
 - object names
 
 ### Scan-First
@@ -1602,6 +1650,7 @@ Convert sampled windows into searchable units with:
 
 - frame embeddings
 - object tags
+- appearance tags for supported tracked vehicle crops
 - representative frames
 
 ### Stage 3. Natural-language search
@@ -1645,7 +1694,8 @@ Use segmentation to answer:
 Return:
 
 - timestamps
-- matched clip
+- matched frames immediately
+- matched clips only when exported
 - segmented preview
 - exportable reports
 
@@ -1694,6 +1744,7 @@ Important truth:
 This project is best understood as a layered surveillance search system:
 
 - YOLO + ByteTrack answers: what objects are present
+- appearance tagging answers: whether a supported tracked vehicle crop looks roughly like `yellow car`, `white bus`, and similar phrases
 - SigLIP2 answers: which sampled frames are semantically similar to the query
 - turbovec answers: which indexed frame embeddings should be searched first
 - Florence-2 answers: which top candidate frames are better described and should be reranked higher

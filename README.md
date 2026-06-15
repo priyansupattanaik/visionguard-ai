@@ -34,6 +34,7 @@ Full project documentation:
 - Reduced repeated downloads by supporting Drive-backed cache in Colab
 - Removed clip extraction from the initial query path so search returns matched frames and timestamps first and generates clips only when you export selected matches
 - Removed noisy event-tag injection from runtime search to reduce false positives
+- Added query normalization plus color-aware vehicle matching for queries such as `yellow car` or `white bus`
 
 ## Local run
 
@@ -120,6 +121,7 @@ Push this repo to a Gradio Space. The YAML block at the top of this `README.md` 
 - Mount Drive in Colab before running if you want model downloads cached between sessions.
 - Best experience comes from GPU-backed Colab or GPU-enabled Spaces.
 - Search now uses frame-first retrieval with semantic query expansion, object-aware reranking, and `Florence-2` verification on top candidates.
+- Vehicle queries with color words now use coarse per-frame appearance tags, so `yellow car` is not treated the same as any generic `car`.
 - Frame and segment embeddings are persisted to local `turbovec` indexes per scan, so repeated queries use the vector index instead of rescoring everything in Python.
 - The UI writes a short answer block below the query and shows matched sampled frames immediately.
 - If no strong semantic match is found, the app now falls back to nearest object-backed or low-confidence frame matches instead of showing a blank result area.
