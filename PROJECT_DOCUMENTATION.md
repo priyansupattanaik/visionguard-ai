@@ -1152,9 +1152,10 @@ This is the main optimization concept of the project.
 - denser frame sampling for better timestamp precision
 - averaged window embeddings
 - `turbovec` top-k vector retrieval instead of full Python rescoring over every frame or segment
-- Florence-2 verification only on top candidates
+- Florence-2 verification only on the top candidate during search
 - Query-time frame re-selection inside matched windows for top-4 hits
 - Florence-2 phrase grounding shown at search result time for top-1 hit, with YOLO box fallback for detector-supported classes
+- Query-time detector-backed matching uses stored scan-time detections instead of re-running YOLO over every indexed frame
 - clip generation deferred until export
 - atomic clip writes to avoid broken partially-written MP4s
 - optional ffmpeg finalize to browser-friendly H.264 output
@@ -1230,6 +1231,18 @@ The project is more scalable than before, but not unbounded.
 This is intentional for speed.
 
 The project does not segment the full video during scanning.
+
+### 13.5 Why Indexing And First Query Can Still Feel Slow
+
+Even after optimization, the first full run in Colab can still feel slow because:
+
+- YOLO11m must load
+- SigLIP2 So400m must load
+- Florence-2-large must load before verification and grounding are available
+- scan-time detection and embedding still run over every sampled frame
+
+`turbovec` speeds up vector retrieval after embeddings already exist.
+It does not remove the model inference cost of indexing or first-load model startup.
 
 ## 14. Known Warnings and Their Meaning
 

@@ -31,6 +31,7 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 - Grounding box on top-1 result at search time
 - Exact frame re-selection within matched windows
 - Segmented clip and region mask on export
+- Fast shortlist retrieval with turbovec after scan-time indexing is complete
 
 ## Known Limitations
 
@@ -39,6 +40,7 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 - Queries shorter than 3 words or very abstract queries (unusual activity, suspicious thing)
   will return weaker results.
 - Very long videos increase scan time linearly. This is expected behavior.
+- First-run startup is slower because YOLO11m, SigLIP2, and Florence-2-large must load before retrieval becomes responsive.
 
 ## Setup
 

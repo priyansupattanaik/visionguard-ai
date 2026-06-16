@@ -254,21 +254,6 @@ class VisionGuardPipeline:
         for row in self.idx.get("frames", []):
             matched = self._matching_detections(row, qobjs, qcolors, cls_to_name)
             if not matched:
-                frame = cv2.imread(row["frame_path"])
-                if frame is None:
-                    continue
-                dets = self.trk.detect(frame, cls=class_ids, conf=0.12)
-                enriched = []
-                for det in dets:
-                    name = str(det["name"]).strip().lower()
-                    if name not in qobjs:
-                        continue
-                    color = None
-                    if name in {"car", "truck", "bus", "motorcycle", "bicycle"}:
-                        color = self._estimate_color(frame, det["box"])
-                    enriched.append({**det, "name": name, "color": color})
-                matched = self._matching_detections({"detections": enriched}, qobjs, qcolors, cls_to_name)
-            if not matched:
                 continue
             best_conf = max(float(x.get("conf", 0.0)) for x in matched)
             if best_conf < 0.2:
@@ -459,7 +444,7 @@ class VisionGuardPipeline:
         boxes = [det["box"] for det in dets if str(det.get("name", "")).strip().lower() in want]
         return boxes or hit.get("det_boxes", [])
 
-    def _apply_reselection(self, hits, query, query_vec, top_n=4):
+    def _apply_reselection(self, hits, query, query_vec, top_n=1):
         take = min(top_n, len(hits))
         for i in range(take):
             frame_path, best_ts, best_score = self._reselect_best_frame(self.idx["video"], hits[i]["start"], hits[i]["end"], query_vec, step_sec=0.1)
@@ -472,7 +457,7 @@ class VisionGuardPipeline:
             hits[i]["det_boxes"] = self._refresh_det_boxes_for_hit(hits[i], query)
         return hits
 
-    def _verify_rows(self, rows, query, top_n=6):
+    def _verify_rows(self, rows, query, top_n=1):
         if not rows:
             return rows
         q_text_vec = self.enc.embed_text(query)
@@ -770,7 +755,7 @@ class VisionGuardPipeline:
         qcolors = set(self._query_colors(q))
         detector_hits = self._refine_detector_hits(q, top_k)
         if detector_hits:
-            return self._apply_reselection(detector_hits, q, qv, top_n=min(4, top_k))
+            return self._apply_reselection(detector_hits, q, qv, top_n=1)
         if qobjs and self._is_strict_object_query(q):
             return []
         frames = self.idx.get("frames", [])
@@ -821,18 +806,18 @@ class VisionGuardPipeline:
         rows = [x for x in ranked_rows if x["score"] >= 0.14]
         out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
         if out:
-            out = self._verify_rows(out, q, top_n=max(top_k * 2, 4))[:top_k]
-            return self._apply_reselection(out, q, qv, top_n=min(4, top_k))
+            out = self._verify_rows(out, q, top_n=1)[:top_k]
+            return self._apply_reselection(out, q, qv, top_n=1)
         obj_hits = self._fallback_object_hits(q, top_k)
         if obj_hits:
-            return self._apply_reselection(obj_hits, q, qv, top_n=min(4, top_k))
+            return self._apply_reselection(obj_hits, q, qv, top_n=1)
         if ranked_rows:
             weak = self._cluster_frame_hits(ranked_rows[: max(top_k * 3, 8)], top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
             for hit in weak:
                 hit["summary"] = f"low-confidence visual match at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects']) if hit['objects'] else 'no tracked objects'}"
                 hit["low_confidence"] = True
             if weak:
-                return self._apply_reselection(weak, q, qv, top_n=min(4, top_k))
+                return self._apply_reselection(weak, q, qv, top_n=1)
         n = len(self.idx["segments"])
         if n == 0:
             return []
@@ -881,8 +866,8 @@ class VisionGuardPipeline:
             if row["score"] < 0.18:
                 continue
             out.append(row)
-        out = self._verify_rows(out, q, top_n=max(top_k * 2, 4))[:top_k]
-        return self._apply_reselection(out, q, qv, top_n=min(4, top_k))
+        out = self._verify_rows(out, q, top_n=1)[:top_k]
+        return self._apply_reselection(out, q, qv, top_n=1)
 
     def prepare_hits(self, hits, query):
         out = []
