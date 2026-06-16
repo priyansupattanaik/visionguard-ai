@@ -114,11 +114,11 @@ def export_selected(picks, q, hits):
     return gr.update(visible=True, value=zipf), gr.update(visible=True, value=html), gr.update(visible=True, value=csv)
 
 
-with gr.Blocks(title="VisionGuard AI", css=css, theme=theme) as demo:
+with gr.Blocks(title="Vision Guard", css=css, theme=theme) as demo:
     gr.HTML(
         """
 <div class="hero">
-  <h1>VisionGuard AI</h1>
+  <h1>Vision Guard</h1>
   <p>Step 1: scan the video. Step 2: write a query and find matches. Then review each match and export only what you want.</p>
 </div>
 """

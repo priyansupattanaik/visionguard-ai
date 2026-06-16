@@ -1,4 +1,4 @@
-# VisionGuard AI
+# Vision Guard
 
 A scan-first CCTV video search system.
 Scan a video once. Search it many times using natural-language queries.

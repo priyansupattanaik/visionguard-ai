@@ -42,7 +42,7 @@ class ReportGenerator:
 <html>
 <head>
   <meta charset="utf-8">
-  <title>VisionGuard AI</title>
+  <title>Vision Guard</title>
   <style>
     body{font-family:system-ui,sans-serif;background:#f3f5f7;color:#14202b;margin:0}
     .wrap{max-width:1080px;margin:0 auto;padding:28px}
@@ -58,7 +58,7 @@ class ReportGenerator:
 <body>
   <div class="wrap">
     <div class="hero">
-      <h1>VisionGuard AI</h1>
+      <h1>Vision Guard</h1>
       <div>query: {{ q }}</div>
       <div>video: {{ video }}</div>
       <div>generated: {{ now }}</div>

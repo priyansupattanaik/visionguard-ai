@@ -1,8 +1,8 @@
-# VisionGuard AI Project Documentation
+# Vision Guard Project Documentation
 
 ## 1. Project Summary
 
-VisionGuard AI is a scan-first CCTV video search system.
+Vision Guard is a scan-first CCTV video search system.
 
 The goal is:
 
