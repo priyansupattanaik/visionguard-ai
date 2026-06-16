@@ -25,8 +25,11 @@ class GroundedSegmenter:
             if self.dev != "cuda":
                 self.sm.to(self.dev)
 
-    def detect(self, frame, query):
-        boxes, scores, _ = self.flo.ground_frame(frame, query.strip().lower())
+    def detect(self, frame_path, query, fallback_boxes=None):
+        boxes = self.flo.ground_phrase(frame_path, query.strip().lower())
+        if not boxes:
+            boxes = fallback_boxes or []
+        scores = [max(0.15, 1.0 - 0.08 * i) for i in range(len(boxes))]
         texts = [query.strip().lower()] * len(boxes)
         return boxes, scores, texts
 
@@ -60,7 +63,7 @@ class GroundedSegmenter:
             cv2.putText(out, f"{scores[i]:.2f}", (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, c, 2, cv2.LINE_AA)
         return out
 
-    def segment_clip(self, video, query, out_path, frame_dir, stride=3):
+    def segment_clip(self, video, query, out_path, frame_dir, stride=3, fallback_boxes=None):
         cap = cv2.VideoCapture(video)
         fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
@@ -81,7 +84,9 @@ class GroundedSegmenter:
             if first is None:
                 first = frame.copy()
             if i % stride == 0:
-                boxes, scores, _ = self.detect(frame, query)
+                frame_path = os.path.join(frame_dir, f"segment_src_{i:05d}.jpg")
+                cv2.imwrite(frame_path, frame)
+                boxes, scores, _ = self.detect(frame_path, query, fallback_boxes=fallback_boxes)
                 masks = self.segment(frame, boxes[:2]) if boxes else []
                 prev = self.overlay(frame, boxes[:2], scores[:2], masks)
                 if boxes:

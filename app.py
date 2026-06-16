@@ -56,12 +56,17 @@ def _ans(q, rows):
 
 def _gallery(rows):
     out = []
-    for x in rows:
-        frame_path = x.get("display_frame_path") or x.get("frame_path")
+    for i, x in enumerate(rows):
+        frame_path = x.get("gallery_frame") if i == 0 else x.get("representative_frame_path")
+        frame_path = frame_path or x.get("frame_path")
         if not frame_path:
             continue
         prefix = "low confidence | " if x.get("low_confidence") else ""
-        out.append((frame_path, f"{x['label']} | {prefix}{x['summary']}"))
+        if i == 0:
+            caption = f"{x['query']} | {x.get('peak_ts', x['start']):.2f}s | {prefix}{x['summary']}"
+        else:
+            caption = f"{x['label']} | {prefix}{x['summary']}"
+        out.append((frame_path, caption))
     return out
 
 
@@ -82,12 +87,13 @@ def scan_only(video):
 def find_query(q):
     blank_pick = gr.update(choices=[], value=[])
     if not pipe.idx:
-        return "scan a video first", "", [], blank_pick, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+        return "scan a video first", "", "", [], blank_pick, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
     if not q or not q.strip():
-        return "enter a natural-language query", "", [], blank_pick, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+        return "enter a natural-language query", "", "", [], blank_pick, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
     hits = pipe.search(q.strip(), top_k=4)
     seg = pipe.prepare_hits(hits, q.strip())
-    rows = [[i, round(x["score"], 4), round(x.get("peak_ts", x["start"]), 2), round(x["start"], 2), round(x["end"], 2), x["summary"], ", ".join(x["objects"])] for i, x in enumerate(seg, 1)]
+    searched_for = ", ".join(pipe._query_variants(q.strip()))
+    rows = [[round(x.get("peak_ts", x["start"]), 2), f"{x['start']:.2f}s - {x['end']:.2f}s", ", ".join(x["objects"]), x["summary"]] for x in seg]
     ans = _ans(q.strip(), seg)
     choices = [x["label"] for x in seg]
     gal = _gallery(seg)
@@ -97,7 +103,7 @@ def find_query(q):
         note = "### matched frames\n\nThe gallery below shows the nearest available sampled frames. These results are low confidence, so review them carefully before export."
     else:
         note = "### matched frames\n\nThe gallery below shows the top sampled frames for your query. Select any rows you want to export as clips and reports."
-    return "matches ready", ans, rows, gr.update(choices=choices, value=choices[:1]), gal, note, q.strip(), seg, gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+    return "matches ready", ans, f"Searched for: {searched_for}", rows, gr.update(choices=choices, value=choices[:1]), gal, note, q.strip(), seg, gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
 
 
 def export_selected(picks, q, hits):
@@ -132,11 +138,12 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=theme) as demo:
             live = gr.Image(label="live indexing preview", interactive=False, elem_classes="hidden-empty")
             info = gr.Markdown(elem_classes="tight-md")
             query = gr.Textbox(label="query", placeholder="person sitting near gate, white car entering, fight near road, car accident", interactive=False)
+            searched = gr.Markdown(elem_classes="tight-md")
             find_btn = gr.Button("step 2: find matches", interactive=False)
 
         with gr.Column(scale=2, elem_classes="panel result-stack"):
             answer = gr.Markdown(elem_classes="tight-md")
-            table = gr.Dataframe(headers=["rank", "score", "moment", "start", "end", "summary", "objects"], interactive=False, wrap=True)
+            table = gr.Dataframe(headers=["Best Frame At", "Clip Window", "Objects", "Summary"], interactive=False, wrap=True)
             pick = gr.CheckboxGroup(label="choose clips to export")
             export_btn = gr.Button("export selected")
             with gr.Row(elem_classes="export-files"):
@@ -148,7 +155,8 @@ with gr.Blocks(title="VisionGuard AI", css=css, theme=theme) as demo:
 
     scan_btn.click(scan_only, [video], [status, live, info, query, q_state, hits_state])
     scan_btn.click(lambda: gr.update(interactive=True), None, find_btn)
-    find_btn.click(find_query, [query], [status, answer, table, pick, gallery, match_md, q_state, hits_state, zipf, html, csv])
+    scan_btn.click(lambda: "", None, searched)
+    find_btn.click(find_query, [query], [status, answer, searched, table, pick, gallery, match_md, q_state, hits_state, zipf, html, csv])
     export_btn.click(export_selected, [pick, q_state, hits_state], [zipf, html, csv])
 
 

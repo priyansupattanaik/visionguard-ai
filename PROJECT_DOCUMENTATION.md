@@ -43,7 +43,7 @@ The current app flow is:
 5. Click `step 2: find matches`.
 6. The system searches indexed sampled frames, clusters them into clip candidates, verifies the top candidates, and returns top time ranges.
 7. The UI shows the matched-frame gallery and timestamp table immediately.
-8. When the query maps to a detector-supported class, the backend refines against real per-frame detections and renders boxed matched-frame previews.
+8. After search, the top-1 matched frame is shown with grounding boxes drawn if Florence-2 phrase grounding succeeds. For detector-supported classes, YOLO scan-time boxes are used as fallback.
 9. No clip is generated just to view a result.
 10. Clip generation, grounding, and segmentation happen only when selected results are exported.
 11. Selected clips and reports can be exported.
@@ -76,6 +76,8 @@ Current main files:
 - [requirements.txt](/D:/CDAC_PROJECT/CV_Project/requirements.txt:1): Python deps
 - [VisionGuard_Colab.ipynb](/D:/CDAC_PROJECT/CV_Project/VisionGuard_Colab.ipynb:1): Colab run notebook
 - [README.md](/D:/CDAC_PROJECT/CV_Project/README.md:1): quick start
+
+There is no legacy grounding-helper file in the current project.
 
 Runtime folders:
 
@@ -159,6 +161,9 @@ It uses:
 - deduplication of near-identical windows
 
 This layer turns indexed frames and aggregated windows into ranked matches.
+
+Query-time frame re-selection is applied to top hits after turbovec retrieval.
+The frame shown is the highest-scoring frame within the matched window for the specific query, not the scan-time representative.
 
 ### 5A.5 Localization and Segmentation Layer
 
@@ -247,7 +252,7 @@ Used for:
 
 Why it exists here:
 
-- it gives temporal continuity and stronger re-identification behavior than the lighter ByteTrack path
+- it gives temporal continuity and stronger re-identification behavior across sampled frames
 
 ### SigLIP2
 
@@ -589,6 +594,11 @@ Nearby high-scoring sampled frames are grouped into one clip candidate.
 
 This avoids returning many nearly identical rows for the same event moment.
 
+### Step 7A. Query-time frame re-selection
+
+For each cluster in the top hits, the video is re-read densely at 0.1s intervals inside the cluster's time range.
+The frame with the highest SigLIP2 cosine similarity to the query vector is selected as the hit's displayed frame and its timestamp becomes the reported moment.
+
 ### Step 8. Florence-2 verification
 
 Only the top candidate frames are passed into Florence-2-large.
@@ -599,6 +609,12 @@ That verification output is then used to:
 
 - improve the summary shown to the user
 - contribute a second semantic signal for reranking the shortlist
+
+### Step 8A. Florence-2 phrase grounding on top-1 result
+
+The top-1 hit's re-selected frame is passed to Florence-2-large with CAPTION_TO_PHRASE_GROUNDING.
+If boxes are returned, they are drawn onto the frame and the result is shown in the gallery.
+If Florence returns empty and the query maps to a detector-supported class, YOLO scan-time boxes stored at index time are used instead.
 
 ### Step 9. Final result rows
 
@@ -993,7 +1009,7 @@ Alternatives:
 
 Why BoT-SORT:
 
-- stronger identity continuity than a lighter ByteTrack path
+- stronger identity continuity across sampled frames
 - better suited to occlusion-heavy CCTV scenes when GPU headroom allows
 
 ### 7.5 SigLIP2 So400m/14 384
@@ -1071,9 +1087,7 @@ Alternatives:
 
 - Grounding DINO
 - OWL-ViT
-- LocateAnything-3B
-
-Why it was added:
+Why it is used:
 
 - one Florence model now covers both shortlist verification and grounding
 - stable Hugging Face release
@@ -1083,15 +1097,6 @@ Important note:
 
 - it helps localization
 - it does not replace a temporal incident model
-
-### 7.8 Grounding DINO
-
-Grounding DINO was used earlier as a grounding fallback.
-
-Current status:
-
-- removed from the active runtime path to reduce model downloads and simplify the stack
-- kept here only as a conceptual alternative, not as part of the current backend
 
 ### 7.9 SAM2
 
@@ -1117,9 +1122,8 @@ Current defaults from code:
 - tracker: `yolo11m.pt`
 - tracker mode: `botsort.yaml`
 - retrieval: `google/siglip2-so400m-patch14-384`
-- verifier: `microsoft/Florence-2-large`
+- verifier + grounder: `microsoft/Florence-2-large` (one model, two tasks)
 - vector retriever: `turbovec` `IdMapIndex`
-- grounding primary: `microsoft/Florence-2-large`
 - segmentation: `facebook/sam2.1-hiera-small`
 
 ## 9. Why the Project Does Not Process Every Frame for Everything
@@ -1149,6 +1153,8 @@ This is the main optimization concept of the project.
 - averaged window embeddings
 - `turbovec` top-k vector retrieval instead of full Python rescoring over every frame or segment
 - Florence-2 verification only on top candidates
+- Query-time frame re-selection inside matched windows for top-4 hits
+- Florence-2 phrase grounding shown at search result time for top-1 hit, with YOLO box fallback for detector-supported classes
 - clip generation deferred until export
 - atomic clip writes to avoid broken partially-written MP4s
 - optional ffmpeg finalize to browser-friendly H.264 output
@@ -1187,6 +1193,8 @@ These are temporal events.
 The current pipeline improves retrieval and localization, but event correctness can still fail because:
 
 - sampling may miss fine-grained motion
+- exact frame precision is improved but not guaranteed for events shorter than 0.1 seconds
+- exact frame precision is also not guaranteed for events with no YOLO-detectable objects
 - grounding localizes objects, not event truth
 - the runtime avoids injecting event labels by default because those labels produced false positives
 
@@ -1498,9 +1506,6 @@ A: It acts as a second-stage verifier and description model on top candidates, i
 Q: Why use Florence-2-large for grounding too?  
 A: It lets the runtime use one active Florence model family for both shortlist verification and matched-frame phrase grounding instead of mixing two grounding frameworks.
 
-Q: Why was the older LocateAnything path removed from the active runtime?  
-A: To simplify the grounding stack around one Florence grounding framework and avoid maintaining parallel active grounding paths.
-
 Q: Why use SAM2?  
 A: To convert grounded boxes into region masks and segmented previews.
 
@@ -1522,6 +1527,9 @@ A: Frame sampling, scan-first indexing, frame-first ANN retrieval with turbovec,
 
 Q: Why are matched frames shown faster now?  
 A: Because the query flow no longer generates clips just to display search results. It shows frame results first and defers clip generation until export.
+
+Q: Why are some matched frames shown with bounding boxes and others without?  
+A: The top-1 result runs Florence-2 phrase grounding immediately after search and draws boxes if the queried phrase can be grounded. Results 2-4 show boxes only on export. For detector-supported classes, YOLO scan-time boxes serve as a fallback when Florence grounding returns empty.
 
 Q: Why are atomic writes used for clips?  
 A: To prevent broken MP4 files from being exposed before writing finishes.
@@ -1770,11 +1778,12 @@ Important truth:
 This project is best understood as a layered surveillance search system:
 
 - YOLO11m + BoT-SORT answers: what objects are present and how they persist across sampled frames
-- appearance tagging answers: whether a supported tracked vehicle crop looks roughly like `yellow car`, `white bus`, and similar phrases
+- Appearance tagging answers: whether a supported tracked vehicle crop matches a color-object query
 - SigLIP2 answers: which sampled frames are semantically similar to the query
-- turbovec answers: which indexed frame embeddings should be searched first
-- Florence-2-large answers: which top candidate frames are better described, and where the queried thing is in the matched frame
-- SAM2 answers: what exact region should be highlighted
-- Clip/report generation answers: how to deliver the result to the user
-
-That layered design is the reason the system is usable in Colab and still supports natural-language video search with localization and exports.
+- turbovec answers: which indexed frame embeddings to search first
+- Query-time re-selection answers: which exact frame inside the matched window best matches the query
+- Florence-2-large (verification role) answers: which top candidate frames are better described
+- Florence-2-large (grounding role) answers: where the queried thing is in the top-1 matched frame
+- YOLO scan-time boxes answer: where detector-supported objects are when Florence grounding fails
+- SAM2 answers: what exact pixel region should be highlighted on export
+- Clip and report generation answers: how to deliver the result to the user

@@ -66,7 +66,7 @@ class FlorenceVerifier:
         except Exception:
             return None
 
-    def caption_path(self, frame_path):
+    def verify_frame(self, frame_path):
         if frame_path in self.cache:
             return self.cache[frame_path]
         self.load()
@@ -90,23 +90,26 @@ class FlorenceVerifier:
         self.cache[frame_path] = caption
         return caption
 
-    def ground_frame(self, frame, phrase):
+    def ground_phrase(self, frame_path, phrase):
+        self.load()
+        if self.m is None or self.p is None:
+            return []
+        if not os.path.exists(frame_path):
+            return []
+        frame = cv2.imread(frame_path)
+        if frame is None:
+            return []
         parsed = self._run_task(frame, "<CAPTION_TO_PHRASE_GROUNDING>", text_input=phrase, max_new_tokens=512)
         payload = parsed.get("<CAPTION_TO_PHRASE_GROUNDING>") if isinstance(parsed, dict) else None
         if not isinstance(payload, dict):
-            return [], [], []
+            return []
         boxes = payload.get("bboxes", []) or []
-        labels = payload.get("labels", []) or []
         clean_boxes = []
-        scores = []
-        clean_labels = []
-        for i, box in enumerate(boxes):
+        for box in boxes:
             if not isinstance(box, (list, tuple)) or len(box) != 4:
                 continue
             vals = [float(v) for v in box]
             if vals[2] <= vals[0] or vals[3] <= vals[1]:
                 continue
             clean_boxes.append(vals)
-            clean_labels.append(str(labels[i]) if i < len(labels) else phrase.strip().lower())
-            scores.append(max(0.15, 1.0 - 0.08 * i))
-        return clean_boxes, scores, clean_labels
+        return clean_boxes

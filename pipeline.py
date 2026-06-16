@@ -23,6 +23,7 @@ class VisionGuardPipeline:
         self.out_dir = out_dir
         self.trk = ObjectTracker(model=yolo)
         self.enc = SearchEncoder(model=clip_model)
+        self.vlm = self.enc
         self.ver = FlorenceVerifier(model=florence_model)
         self.seg = GroundedSegmenter(sam=sam, florence_model=florence_model, florence=self.ver)
         self.idx = None
@@ -278,11 +279,13 @@ class VisionGuardPipeline:
                 "score": score,
                 "base_score": score,
                 "ts": row["ts"],
+                "representative_frame_path": row["frame_path"],
                 "frame_path": row["frame_path"],
                 "objects": sorted({x["name"] for x in matched}),
                 "appearances": row.get("appearances", []),
                 "tracks": row["tracks"],
                 "matched_detections": matched,
+                "det_boxes": [x["box"] for x in matched],
             })
         rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         if not rows:
@@ -313,28 +316,38 @@ class VisionGuardPipeline:
             })
         return hits
 
-    def _render_match_preview(self, row):
-        src = row.get("frame_path")
-        if not src or not os.path.exists(src):
-            return src
-        out_dir = os.path.join(self.run_dir, "reports", "matched_frames")
-        os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(out_dir, f"match_{row.get('match_id', 0):02d}_{int(round(row.get('peak_ts', row.get('start', 0.0)) * 100)):06d}.jpg")
-        frame = cv2.imread(src)
+    def _draw_boxes(self, src_path, boxes, out_name, label_text=None):
+        if not src_path or not os.path.exists(src_path):
+            return src_path
+        frame = cv2.imread(src_path)
         if frame is None:
-            return src
-        detections = row.get("matched_detections", [])
-        if detections:
-            for det in detections:
-                x1, y1, x2, y2 = [int(round(v)) for v in det["box"]]
-                label = det["name"]
-                if det.get("color"):
-                    label = f"{det['color']} {label}"
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (20, 220, 245), 3)
-                cv2.putText(frame, label, (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 220, 245), 2, cv2.LINE_AA)
-        cv2.putText(frame, f"{row.get('peak_ts', row.get('start', 0.0)):.2f}s", (18, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
+            return src_path
+        for box in boxes:
+            x1, y1, x2, y2 = [int(round(v)) for v in box]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (40, 220, 120), 2)
+        if label_text:
+            cv2.putText(frame, label_text, (18, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+        out_path = os.path.join(self.run_dir, "frames", out_name)
         cv2.imwrite(out_path, frame)
         return out_path
+
+    def _attach_gallery_frame(self, row, query):
+        src = row.get("representative_frame_path") or row.get("frame_path")
+        if not src:
+            row["gallery_frame"] = src
+            return row
+        try:
+            boxes = self.ver.ground_phrase(src, query)
+        except Exception:
+            boxes = []
+        if not boxes:
+            boxes = row.get("det_boxes", [])
+        if boxes:
+            stamp = int(round(row.get("peak_ts", row.get("start", 0.0)) * 100))
+            row["gallery_frame"] = self._draw_boxes(src, boxes, f"gallery_{row.get('match_id', 0):02d}_{stamp:06d}.jpg", label_text=f"{query} @ {row.get('peak_ts', row.get('start', 0.0)):.2f}s")
+        else:
+            row["gallery_frame"] = src
+        return row
 
     def _query_variants(self, q):
         ql = self._normalize_query(q)
@@ -403,13 +416,69 @@ class VisionGuardPipeline:
         dur = self.idx["meta"]["duration"]
         return max(0.0, ts - pad), min(dur, ts + pad)
 
+    def _reselect_best_frame(self, video_path, start_sec, end_sec, query_vec, step_sec=0.1):
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None, start_sec, -1.0
+        best_score = -1.0
+        best_frame = None
+        best_ts = start_sec
+        current = max(0.0, start_sec)
+        while current <= end_sec + 1e-6:
+            cap.set(cv2.CAP_PROP_POS_MSEC, current * 1000.0)
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                emb = self.vlm.embed_frame(frame)
+                score = float(np.dot(emb, query_vec))
+                ts = float(cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0)
+                if score > best_score:
+                    best_score = score
+                    best_frame = frame.copy()
+                    best_ts = ts
+            current += step_sec
+        cap.release()
+        if best_frame is None:
+            return None, start_sec, -1.0
+        safe_start = str(round(start_sec, 2)).replace(".", "_")
+        out_path = os.path.join(self.run_dir, "frames", f"resel_{safe_start}.jpg")
+        cv2.imwrite(out_path, best_frame)
+        return out_path, best_ts, best_score
+
+    def _refresh_det_boxes_for_hit(self, hit, query):
+        class_ids, _ = self._query_detector_classes(query)
+        if not class_ids:
+            return hit.get("det_boxes", [])
+        frame_path = hit.get("representative_frame_path") or hit.get("frame_path")
+        if not frame_path or not os.path.exists(frame_path):
+            return hit.get("det_boxes", [])
+        frame = cv2.imread(frame_path)
+        if frame is None:
+            return hit.get("det_boxes", [])
+        want = set(self._q_objs(query))
+        dets = self.trk.detect(frame, cls=class_ids, conf=0.12)
+        boxes = [det["box"] for det in dets if str(det.get("name", "")).strip().lower() in want]
+        return boxes or hit.get("det_boxes", [])
+
+    def _apply_reselection(self, hits, query, query_vec, top_n=4):
+        take = min(top_n, len(hits))
+        for i in range(take):
+            frame_path, best_ts, best_score = self._reselect_best_frame(self.idx["video"], hits[i]["start"], hits[i]["end"], query_vec, step_sec=0.1)
+            if not frame_path:
+                continue
+            hits[i]["representative_frame_path"] = frame_path
+            hits[i]["frame_path"] = frame_path
+            hits[i]["peak_ts"] = best_ts
+            hits[i]["reselected_score"] = best_score
+            hits[i]["det_boxes"] = self._refresh_det_boxes_for_hit(hits[i], query)
+        return hits
+
     def _verify_rows(self, rows, query, top_n=6):
         if not rows:
             return rows
         q_text_vec = self.enc.embed_text(query)
         take = min(top_n, len(rows))
         for i in range(take):
-            caption = self.ver.caption_path(rows[i]["frame_path"])
+            caption = self.ver.verify_frame(rows[i].get("representative_frame_path", rows[i]["frame_path"]))
             rows[i]["verified_caption"] = caption
             if not caption:
                 rows[i]["verify_score"] = 0.0
@@ -442,10 +511,12 @@ class VisionGuardPipeline:
                 "start": start,
                 "end": end,
                 "peak_ts": peak["ts"],
+                "representative_frame_path": peak["frame_path"],
                 "frame_path": peak["frame_path"],
                 "objects": objs,
                 "tracks": sorted({tid for row in chunk for tid in row["tracks"]}),
                 "appearances": sorted({tag for row in chunk for tag in row.get("appearances", [])}),
+                "det_boxes": [x["box"] for x in peak.get("detections", [])],
                 "tags": [],
                 "summary": self._frame_summary(peak["query"], peak["ts"], objs),
             })
@@ -485,10 +556,12 @@ class VisionGuardPipeline:
                 "score": score,
                 "base_score": score,
                 "ts": row["ts"],
+                "representative_frame_path": row["frame_path"],
                 "frame_path": row["frame_path"],
                 "objects": row["objects"],
                 "tracks": row["tracks"],
                 "appearances": row.get("appearances", []),
+                "det_boxes": [x["box"] for x in row.get("detections", [])],
             })
         rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         if not rows:
@@ -507,10 +580,12 @@ class VisionGuardPipeline:
                 "start": start,
                 "end": end,
                 "peak_ts": row["ts"],
+                "representative_frame_path": row["frame_path"],
                 "frame_path": row["frame_path"],
                 "objects": row["objects"],
                 "tracks": row["tracks"],
                 "appearances": row.get("appearances", []),
+                "det_boxes": row.get("det_boxes", []),
                 "tags": [],
                 "summary": self._frame_summary(q, row["ts"], row["objects"]),
             })
@@ -625,6 +700,7 @@ class VisionGuardPipeline:
                     "frame": x["frame"],
                     "ts": x["ts"],
                     "frame_path": x["frame_path"],
+                    "representative_frame_path": x["frame_path"],
                     "objects": sorted(x["meta"]["objects"].keys()),
                     "appearances": x["meta"]["appearances"],
                     "tracks": x["meta"]["tracks"],
@@ -694,7 +770,7 @@ class VisionGuardPipeline:
         qcolors = set(self._query_colors(q))
         detector_hits = self._refine_detector_hits(q, top_k)
         if detector_hits:
-            return detector_hits
+            return self._apply_reselection(detector_hits, q, qv, top_n=min(4, top_k))
         if qobjs and self._is_strict_object_query(q):
             return []
         frames = self.idx.get("frames", [])
@@ -734,26 +810,29 @@ class VisionGuardPipeline:
                 "score": score,
                 "base_score": float(base_score),
                 "ts": row["ts"],
+                "representative_frame_path": row["frame_path"],
                 "frame_path": row["frame_path"],
                 "objects": row["objects"],
                 "appearances": row.get("appearances", []),
                 "tracks": row["tracks"],
+                "detections": row.get("detections", []),
             })
         ranked_rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         rows = [x for x in ranked_rows if x["score"] >= 0.14]
         out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
         if out:
-            return self._verify_rows(out, q, top_n=max(top_k * 2, 4))[:top_k]
+            out = self._verify_rows(out, q, top_n=max(top_k * 2, 4))[:top_k]
+            return self._apply_reselection(out, q, qv, top_n=min(4, top_k))
         obj_hits = self._fallback_object_hits(q, top_k)
         if obj_hits:
-            return obj_hits
+            return self._apply_reselection(obj_hits, q, qv, top_n=min(4, top_k))
         if ranked_rows:
             weak = self._cluster_frame_hits(ranked_rows[: max(top_k * 3, 8)], top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
             for hit in weak:
                 hit["summary"] = f"low-confidence visual match at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects']) if hit['objects'] else 'no tracked objects'}"
                 hit["low_confidence"] = True
             if weak:
-                return weak
+                return self._apply_reselection(weak, q, qv, top_n=min(4, top_k))
         n = len(self.idx["segments"])
         if n == 0:
             return []
@@ -784,9 +863,11 @@ class VisionGuardPipeline:
                 "start": seg["start"],
                 "end": seg["end"],
                 "peak_ts": seg["mid"],
+                "representative_frame_path": seg["frame_path"],
                 "frame_path": seg["frame_path"],
                 "objects": seg["objects"],
                 "tracks": seg["tracks"],
+                "det_boxes": [],
                 "tags": seg["tags"],
                 "summary": self._frame_summary(q, seg["mid"], seg["objects"]),
             })
@@ -800,7 +881,8 @@ class VisionGuardPipeline:
             if row["score"] < 0.18:
                 continue
             out.append(row)
-        return self._verify_rows(out, q, top_n=max(top_k * 2, 4))[:top_k]
+        out = self._verify_rows(out, q, top_n=max(top_k * 2, 4))[:top_k]
+        return self._apply_reselection(out, q, qv, top_n=min(4, top_k))
 
     def prepare_hits(self, hits, query):
         out = []
@@ -812,7 +894,10 @@ class VisionGuardPipeline:
             row["frames"] = []
             row["segmented"] = False
             row["label"] = f"{i}. {hit.get('peak_ts', hit['start']):.2f}s"
-            row["display_frame_path"] = self._render_match_preview(row)
+            row["representative_frame_path"] = row.get("representative_frame_path") or row.get("frame_path")
+            row["gallery_frame"] = row["representative_frame_path"]
+            if i == 1:
+                row = self._attach_gallery_frame(row, query)
             out.append(row)
         self.last_hits = out
         return out
@@ -847,7 +932,7 @@ class VisionGuardPipeline:
         seg_dir = os.path.join(self.run_dir, "segments", f"m_{row['match_id']:02d}")
         os.makedirs(seg_dir, exist_ok=True)
         seg_mp4 = os.path.join(self.run_dir, "clips", f"{self._clip_name(row['match_id'], 'seg')}.mp4")
-        seg_clip, frames, seen = self.seg.segment_clip(raw, query, seg_mp4, seg_dir, stride=3)
+        seg_clip, frames, seen = self.seg.segment_clip(raw, query, seg_mp4, seg_dir, stride=3, fallback_boxes=row.get("det_boxes", []))
         return {"raw_clip": raw, "clip": seg_clip if seen > 0 else raw, "frames": frames, "seen": seen}
 
     def _start_segment(self, row, query):
