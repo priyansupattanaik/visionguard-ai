@@ -162,4 +162,5 @@ with gr.Blocks(title="Vision Guard", css=css, theme=theme) as demo:
 
 if __name__ == "__main__":
     share = bool(os.getenv("COLAB_RELEASE_TAG") or os.getenv("KAGGLE_KERNEL_RUN_TYPE"))
-    demo.launch(server_name="0.0.0.0", share=share, show_error=True)
+    server_name = "0.0.0.0" if share else "127.0.0.1"
+    demo.launch(server_name=server_name, share=share, show_error=True)

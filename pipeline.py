@@ -67,28 +67,46 @@ class VisionGuardPipeline:
         crop = frame[y1:y2, x1:x2]
         if crop.size == 0:
             return None
-        rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB).reshape(-1, 3).astype(np.float32)
-        bright = rgb.mean(axis=1)
-        sat = rgb.max(axis=1) - rgb.min(axis=1)
-        keep = sat > 18
-        if keep.any():
-            rgb = rgb[keep]
-        mean = rgb.mean(axis=0)
-        palette = self._color_words()
-        best = None
-        best_dist = 1e9
-        for name, ref in palette.items():
-            d = float(np.linalg.norm(mean - ref))
-            if d < best_dist:
-                best = name
-                best_dist = d
-        if bright.mean() > 205 and sat.mean() < 30:
+        ch, cw = crop.shape[:2]
+        mx1 = int(cw * 0.15)
+        mx2 = int(cw * 0.85)
+        my1 = int(ch * 0.15)
+        my2 = int(ch * 0.85)
+        core = crop[my1:my2, mx1:mx2] if mx2 > mx1 and my2 > my1 else crop
+        hsv = cv2.cvtColor(core, cv2.COLOR_BGR2HSV)
+        hh = hsv[..., 0].astype(np.float32)
+        ss = hsv[..., 1].astype(np.float32)
+        vv = hsv[..., 2].astype(np.float32)
+        valid = vv > 40
+        if not valid.any():
+            return None
+        sat_valid = valid & (ss > 45)
+        if sat_valid.any():
+            hue = hh[sat_valid]
+            blue_ratio = float(((hue >= 95) & (hue <= 130)).mean())
+            red_ratio = float(((hue <= 10) | (hue >= 170)).mean())
+            green_ratio = float(((hue >= 35) & (hue <= 90)).mean())
+            yellow_ratio = float(((hue >= 18) & (hue <= 35)).mean())
+            orange_ratio = float(((hue >= 10) & (hue < 18)).mean())
+            if blue_ratio >= 0.28:
+                return "blue"
+            if red_ratio >= 0.28:
+                return "red"
+            if green_ratio >= 0.28:
+                return "green"
+            if yellow_ratio >= 0.24:
+                return "yellow"
+            if orange_ratio >= 0.22:
+                return "orange"
+        bright = vv[valid]
+        sat = ss[valid]
+        if bright.mean() > 205 and sat.mean() < 32:
             return "white"
         if bright.mean() < 55:
             return "black"
-        if sat.mean() < 22:
+        if sat.mean() < 24:
             return "gray"
-        return best
+        return None
 
     def _appearance_tags(self, frame, detections):
         tags = []
@@ -455,6 +473,9 @@ class VisionGuardPipeline:
             hits[i]["peak_ts"] = best_ts
             hits[i]["reselected_score"] = best_score
             hits[i]["det_boxes"] = self._refresh_det_boxes_for_hit(hits[i], query)
+            if hits[i].get("matched_detections"):
+                labels = sorted({x["name"] for x in hits[i]["matched_detections"]})
+                hits[i]["summary"] = f"detector-matched sampled frame at {best_ts:.2f}s | detected: {', '.join(labels)}"
         return hits
 
     def _verify_rows(self, rows, query, top_n=1):
@@ -592,6 +613,25 @@ class VisionGuardPipeline:
         dur = total / fps if fps else 0.0
         step = max(1, int(round(sample_sec * fps)))
         frames = []
+        pending = []
+        batch_size = 8
+
+        def flush_pending():
+            nonlocal frames, pending
+            if not pending:
+                return
+            emb_list = self.enc.embed_frames([x["frame"] for x in pending])
+            for item, emb in zip(pending, emb_list):
+                frames.append({
+                    "frame_id": np.uint64(len(frames)),
+                    "frame": item["frame_idx"],
+                    "ts": item["ts"],
+                    "emb": emb,
+                    "frame_path": item["frame_path"],
+                    "meta": item["meta"],
+                })
+            pending = []
+
         i = 0
         while True:
             ok, frame = cap.read()
@@ -628,20 +668,21 @@ class VisionGuardPipeline:
                 "still_people": 0,
                 "person": objs.get("person", 0),
             }
-            emb = self.enc.embed_frame(frame)
             frame_path = os.path.join(self.run_dir, "frames", f"f_{i:06d}.jpg")
             cv2.imwrite(frame_path, frame)
-            frames.append({
-                "frame_id": np.uint64(len(frames)),
-                "frame": i,
+            pending.append({
+                "frame_idx": i,
                 "ts": ts,
-                "emb": emb,
+                "frame": frame.copy(),
                 "frame_path": frame_path,
                 "meta": meta,
             })
             yield {"kind": "preview", "image": self._preview(frame, det_rows, ts), "status": f"scanning {ts:.1f}s / {dur:.1f}s"}
+            if len(pending) >= batch_size:
+                flush_pending()
             i += 1
         cap.release()
+        flush_pending()
         block = max(1, int(round(win_sec / sample_sec)))
         segs = []
         for j, item in enumerate(frames):

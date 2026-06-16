@@ -1298,6 +1298,8 @@ This is the main optimization concept of the project.
 - Query-time frame re-selection inside matched windows for top-4 hits
 - Florence-2 phrase grounding shown at search result time for top-1 hit, with YOLO box fallback for detector-supported classes
 - Query-time detector-backed matching uses stored scan-time detections instead of re-running YOLO over every indexed frame
+- Scan-time SigLIP2 frame embeddings are computed in batches instead of one frame at a time
+- Color-object queries for supported vehicles now use a stricter HSV-based dominant-color estimate to reduce false color matches
 - clip generation deferred until export
 - atomic clip writes to avoid broken partially-written MP4s
 - optional ffmpeg finalize to browser-friendly H.264 output

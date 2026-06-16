@@ -53,3 +53,20 @@ class SearchEncoder:
         with torch.no_grad():
             vec = self.m.get_image_features(**inp)
         return self._norm(vec)
+
+    def embed_frames(self, frames):
+        self.load()
+        if not frames:
+            return []
+        imgs = [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in frames]
+        inp = self.p(images=imgs, return_tensors="pt").to(self.dev)
+        with torch.no_grad():
+            vecs = self.m.get_image_features(**inp).detach().cpu().numpy()
+        out = []
+        for vec in vecs:
+            n = np.linalg.norm(vec)
+            if n == 0:
+                out.append(vec.astype(np.float32))
+            else:
+                out.append((vec / n).astype(np.float32))
+        return out
