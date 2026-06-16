@@ -99,6 +99,41 @@ Main layers:
 6. Export and reporting layer
 7. Runtime/cache layer
 
+### 5A.0 Architecture Diagram
+
+```mermaid
+flowchart LR
+    UI["Gradio UI<br/>app.py"]
+    PIPE["Pipeline Orchestrator<br/>pipeline.py"]
+    DET["YOLO11m + BoT-SORT<br/>tracker.py"]
+    RET["SigLIP2 Encoder<br/>vlm.py"]
+    IDX["turbovec / NumPy Index<br/>vector_index.py"]
+    FLO["Florence-2-large<br/>florence.py"]
+    SEG["SAM2 Segmenter<br/>segmenter.py"]
+    CLIP["Clip + Report Export<br/>clip_generator.py + report_generator.py"]
+    CACHE["Drive / HF / Torch Cache<br/>cache_utils.py"]
+
+    UI --> PIPE
+    PIPE --> DET
+    PIPE --> RET
+    RET --> IDX
+    PIPE --> FLO
+    FLO --> SEG
+    PIPE --> CLIP
+    CACHE --> PIPE
+```
+
+What this diagram means:
+
+- `app.py` is only the interaction layer
+- `pipeline.py` is the control layer
+- YOLO handles scan-time object detection
+- SigLIP2 handles text-frame retrieval
+- turbovec stores searchable vectors
+- Florence-2-large handles verification and grounding
+- SAM2 is only used for export-time mask refinement
+- cache setup reduces repeated download cost in Colab
+
 ### 5A.1 Presentation Layer
 
 The presentation layer is the Gradio app in [app.py](/D:/CDAC_PROJECT/CV_Project/app.py:1).
@@ -164,6 +199,30 @@ This layer turns indexed frames and aggregated windows into ranked matches.
 
 Query-time frame re-selection is applied to top hits after turbovec retrieval.
 The frame shown is the highest-scoring frame within the matched window for the specific query, not the scan-time representative.
+
+### 5A.4A Why This Architecture Exists
+
+The architecture is split because one model is not doing all jobs well at the same cost.
+
+Why each stage exists:
+
+- YOLO is used because scan-time object detection is cheaper and more stable than asking a large VLM to inspect every sampled frame
+- SigLIP2 is used because retrieval needs fast text-image similarity, not long-form generation
+- turbovec is used because ANN lookup is faster than rescoring every indexed vector in Python after the scan is done
+- Florence-2-large is used because verification and grounding are expensive, so they are applied only after retrieval narrows the search
+- SAM2 is used only after a match exists because full-video segmentation would be too expensive
+
+When this architecture works best:
+
+- repeated queries against one already scanned video
+- object-centric queries like `umbrella`, `person`, `white bus`
+- review workflows where the user wants timestamps first and clip export later
+
+When this architecture is weaker:
+
+- very short temporal incidents
+- highly abstract event queries
+- scenes where the target object is too small or too occluded for scan-time detection
 
 ### 5A.5 Localization and Segmentation Layer
 
@@ -327,6 +386,37 @@ Why it exists here:
 ## 5B. Backend Working Explained
 
 This section describes how the backend actually processes a request.
+
+### 5B.0 End-to-End Flow Chart
+
+```mermaid
+flowchart TD
+    A["Upload Video"] --> B["Scan Video"]
+    B --> C["Sample Frames Every 0.75s"]
+    C --> D["YOLO11m Detection"]
+    D --> E["SigLIP2 Frame Embeddings"]
+    E --> F["Write Frame / Segment Index"]
+    F --> G["Enter Natural-Language Query"]
+    G --> H["Embed Query With SigLIP2"]
+    H --> I["turbovec Top-K Retrieval"]
+    I --> J["Cluster Nearby Hits"]
+    J --> K["Florence-2 Verification (Top-1)"]
+    K --> L["Query-Time Frame Re-selection (0.1s inside matched window)"]
+    L --> M["Florence-2 Grounding On Top-1"]
+    M --> N["YOLO Box Fallback If Needed"]
+    N --> O["Show Matched Frames + Timestamps"]
+    O --> P["Optional Export"]
+    P --> Q["Clip Extraction"]
+    Q --> R["SAM2 Segmentation"]
+    R --> S["CSV / JSON / HTML / ZIP Outputs"]
+```
+
+This flow chart is the simplest correct picture of the runtime.
+
+The important design idea is:
+
+- the full video is not re-understood from scratch for every query
+- the expensive models are delayed until the search space is already small
 
 ### 5B.1 App Startup
 
@@ -750,6 +840,58 @@ Conceptual backend data flow:
 This is the shortest accurate summary of the backend processing chain.
 
 ## 6. End-to-End Technical Flow
+
+### 6.0 Worked Examples
+
+These examples explain how the system behaves for different kinds of queries.
+
+### Example 1. Object Query: `umbrella`
+
+What happens:
+
+1. The video is already scanned.
+2. The query is normalized to `umbrella`.
+3. The pipeline checks detector-supported classes and sees that `umbrella` is supported.
+4. Stored scan-time detections are searched first.
+5. Matching frames are ranked.
+6. The top hit is re-read densely inside its clip window.
+7. Florence-2-large tries to ground `umbrella` on that top frame.
+8. If Florence grounding is empty, stored YOLO boxes are used as fallback.
+
+Why this is good:
+
+- object queries are stricter
+- the system avoids showing unrelated semantic frames when a detector-backed path exists
+
+### Example 2. Color-Object Query: `yellow car`
+
+What happens:
+
+1. The query is normalized.
+2. The object term `car` is inferred.
+3. The color term `yellow` is inferred.
+4. Retrieval uses SigLIP2 for shortlist search.
+5. Reranking prefers frames with appearance tags such as `yellow car`.
+6. The top hit is re-selected more precisely inside the matched window.
+
+Why this is harder than `car`:
+
+- the system is not using a dedicated fine-grained color classifier
+- it uses coarse appearance tagging from detected vehicle crops
+
+### Example 3. Event-Like Query: `accident`
+
+What happens:
+
+1. The query expands to variants such as `traffic accident`, `vehicle collision`, `car crash`.
+2. SigLIP2 retrieves visually similar candidate frames and windows.
+3. Florence-2-large verifies the top result description.
+4. The system returns the most similar matched frames and timestamps.
+
+What this does not mean:
+
+- it does not prove a legally or semantically verified collision event happened
+- it means the returned frames look most similar to the event-like query under the current retrieval stack
 
 ### 6.1 Video Input
 
@@ -1499,11 +1641,17 @@ A: It pays the analysis cost once and allows repeated queries cheaply afterward.
 Q: What are the major stages of the pipeline?  
 A: Video scan, frame sampling, tracking, embedding, frame indexing, query expansion, fast retrieval, candidate clustering, Florence verification, clip prep, grounding, segmentation, export.
 
+Q: Can you explain the architecture in one sentence?  
+A: The system first scans and indexes a video, then uses fast retrieval to narrow the search, then applies more expensive verification and grounding only on the best candidate.
+
 Q: Why use multiple models instead of one large model?  
 A: Each part solves a different subproblem more efficiently: scan-time detection, fast retrieval, top-k verification, grounding, and segmentation.
 
 Q: Why not process every frame densely?  
 A: It is too expensive for Colab and would make indexing much slower.
+
+Q: Why is the shown frame sometimes different from the scan-time representative frame?  
+A: Because the system now re-reads the matched window at 0.1 second intervals and replaces the scan-time representative with the best query-specific frame inside that window.
 
 ### 18.3 Model Choice
 
@@ -1519,6 +1667,9 @@ A: It acts as a second-stage verifier and description model on top candidates, i
 Q: Why use Florence-2-large for grounding too?  
 A: It lets the runtime use one active Florence model family for both shortlist verification and matched-frame phrase grounding instead of mixing two grounding frameworks.
 
+Q: Why use turbovec if the app can still feel slow?  
+A: turbovec speeds up vector retrieval after embeddings exist. It does not remove the cost of YOLO detection, SigLIP2 embedding, Florence verification, or first-run model loading.
+
 Q: Why use SAM2?  
 A: To convert grounded boxes into region masks and segmented previews.
 
@@ -1529,6 +1680,9 @@ A: No. It is a practical retrieval-and-localization system, not a guaranteed per
 
 Q: Why can collision detection still fail?  
 A: Collision is a temporal event. Localization alone is not enough, and the current runtime does not claim reliable event truth from object boxes alone.
+
+Q: Can the project detect any object at all?  
+A: No. It works best on detector-supported or semantically retrievable objects, but it does not guarantee unlimited arbitrary-category detection.
 
 Q: Does the system hallucinate?  
 A: It can produce incorrect retrievals or weak event matches. No honest open-world system can promise zero hallucination.
