@@ -61,7 +61,7 @@ class SearchEncoder:
         imgs = [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in frames]
         inp = self.p(images=imgs, return_tensors="pt").to(self.dev)
         with torch.no_grad():
-            vecs = self.m.get_image_features(**inp).detach().cpu().numpy()
+            vecs = self._vec(self.m.get_image_features(**inp)).detach().cpu().numpy()
         out = []
         for vec in vecs:
             n = np.linalg.norm(vec)
