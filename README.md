@@ -18,7 +18,7 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 |---|---|
 | Detection + Tracking | YOLO11m + BoT-SORT |
 | Retrieval | SigLIP2 So400m/14 384 |
-| Verification + Grounding | LocateAnything-3B |
+| Verification + Grounding | Qwen2.5-VL-7B-Instruct |
 | Segmentation | SAM2.1-hiera-small |
 | Vector Index | turbovec IdMapIndex |
 
@@ -27,8 +27,9 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 - Natural-language search over a scanned video
 - Repeated queries without rescanning
 - Object-aware retrieval (person, car, truck, bus, motorcycle, bicycle, umbrella)
-- Color-object queries for supported vehicle classes (yellow car, white bus)
-- Grounded query verification on top matches at search time
+- Open-world query verification for objects and visible events outside fixed detector labels
+- Color-object queries through the same open-language verification path
+- Open-world query verification on top matches at search time
 - Bounding boxes drawn on matched frames when the query can be grounded
 - Exact frame re-selection within matched windows
 - Segmented clip and region mask on export
@@ -37,11 +38,11 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 ## Known Limitations
 
 - Temporal events (collisions, fights, falls) are not guaranteed to be correctly identified.
-  The system retrieves visually similar frames, not verified event classifications.
+  The system verifies shortlisted frames with Qwen2.5-VL, but difficult event understanding is still model-limited.
 - Queries shorter than 3 words or very abstract queries (unusual activity, suspicious thing)
   will return weaker results.
 - Very long videos increase scan time linearly. This is expected behavior.
-- First-run startup is slower because YOLO11m, SigLIP2, LocateAnything-3B, and SAM2 checkpoints must load before the full stack becomes responsive.
+- First-run startup is slower because YOLO11m, SigLIP2, Qwen2.5-VL-7B, and SAM2 checkpoints must load before the full stack becomes responsive.
 
 ## Setup
 
@@ -56,6 +57,19 @@ python app.py
 from google.colab import drive
 drive.mount('/content/drive')
 import os
+base = "/content/drive/MyDrive/visionguard_cache"
+paths = {
+    "HF_HOME": f"{base}/hf",
+    "TRANSFORMERS_CACHE": f"{base}/hf/transformers",
+    "HUGGINGFACE_HUB_CACHE": f"{base}/hf/hub",
+    "TORCH_HOME": f"{base}/torch",
+    "YOLO_CONFIG_DIR": f"{base}/ultralytics",
+    "ULTRALYTICS_SETTINGS": f"{base}/ultralytics/settings.json",
+}
+for key, value in paths.items():
+    os.environ[key] = value
+for key in ["HF_HOME", "TRANSFORMERS_CACHE", "HUGGINGFACE_HUB_CACHE", "TORCH_HOME", "YOLO_CONFIG_DIR"]:
+    os.makedirs(os.environ[key], exist_ok=True)
 if not os.path.exists("/content/visionguard-ai"):
     !git clone https://github.com/priyansupattanaik/visionguard-ai.git /content/visionguard-ai
 %cd /content/visionguard-ai

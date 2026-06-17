@@ -1,4 +1,5 @@
 import os
+import shutil
 
 import torch
 
@@ -20,10 +21,26 @@ class ObjectTracker:
     def reset(self):
         self.m = None
 
+    def _cached_model_path(self):
+        if os.path.dirname(self.model_name):
+            return self.model_name
+        base = "/content/drive/MyDrive/visionguard_cache/ultralytics/weights"
+        if not os.path.exists("/content/drive/MyDrive"):
+            return self.model_name
+        os.makedirs(base, exist_ok=True)
+        cached = os.path.join(base, self.model_name)
+        return cached if os.path.exists(cached) else self.model_name
+
     def load(self):
         if self.m is not None:
             return
-        self.m = YOLO(self.model_name)
+        model_path = self._cached_model_path()
+        self.m = YOLO(model_path)
+        if model_path == self.model_name and os.path.exists(self.model_name) and os.path.exists("/content/drive/MyDrive"):
+            cached = os.path.join("/content/drive/MyDrive/visionguard_cache/ultralytics/weights", self.model_name)
+            os.makedirs(os.path.dirname(cached), exist_ok=True)
+            if not os.path.exists(cached):
+                shutil.copy2(self.model_name, cached)
         self.m.to(self.dev)
 
     def class_ids(self, names):

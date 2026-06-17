@@ -6,15 +6,29 @@ This section is the authoritative description of the current backend.
 
 - retrieval encoder: `google/siglip2-so400m-patch14-384`
 - detector: `yolo11m.pt`
-- verifier + grounder: `nvidia/LocateAnything-3B`
+- verifier + grounder: `Qwen/Qwen2.5-VL-7B-Instruct`
 - segmenter: `facebook/sam2.1-hiera-small`
 - vector retrieval backend: `turbovec` with NumPy fallback
 
 ## Current Architecture Note
 
-The live runtime no longer uses `Florence-2-large` as the active verifier/grounder.
-If older sections below mention Florence, treat those as historical notes from an earlier revision.
-The current source of truth for verification and grounding is [locateanything.py](/D:/CDAC_PROJECT/CV_Project/locateanything.py:1).
+The live runtime no longer uses `Florence-2-large` or `LocateAnything-3B` as the active verifier/grounder.
+If older sections below mention those models, treat those as historical notes from earlier revisions.
+The current source of truth for verification and grounding is [qwen_verifier.py](/D:/CDAC_PROJECT/CV_Project/qwen_verifier.py:1).
+
+## Open-World Retrieval Rule
+
+The app does not manually map every possible noun to a detector class.
+
+Current query behavior:
+
+1. SigLIP2 retrieves visually similar candidate frames.
+2. Qwen2.5-VL receives each shortlisted frame and the exact user query.
+3. Qwen2.5-VL must confirm that the frame satisfies the query.
+4. Only confirmed frames are returned as strong matches.
+5. If no candidate is confirmed, the UI reports no strong match instead of showing an unverified frame.
+
+YOLO metadata is still kept for speed and visible-object context, but it is no longer the final authority for arbitrary natural-language queries.
 
 ## 1. Project Summary
 
@@ -59,7 +73,7 @@ The current app flow is:
 5. Click `step 2: find matches`.
 6. The system searches indexed sampled frames, clusters them into clip candidates, verifies the top candidates, and returns top time ranges.
 7. The UI shows the matched-frame gallery and timestamp table immediately.
-8. After search, the top matched frame is shown with grounding boxes drawn if LocateAnything grounds the query phrase on that frame. For detector-supported classes, stored YOLO boxes may still appear when they align with the query.
+8. After search, Qwen2.5-VL verifies the exact query against shortlisted frames and returns boxes when the matching region can be localized. For detector-supported classes, stored YOLO metadata may still appear as context.
 9. No clip is generated just to view a result.
 10. Clip generation, grounding, and segmentation happen only when selected results are exported.
 11. Selected clips and reports can be exported.
@@ -84,8 +98,8 @@ Current main files:
 - [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1): YOLO11m + BoT-SORT object tracking
 - [vlm.py](/D:/CDAC_PROJECT/CV_Project/vlm.py:1): text-frame embedding search
 - [vector_index.py](/D:/CDAC_PROJECT/CV_Project/vector_index.py:1): `turbovec`-backed frame and segment vector indexes with NumPy fallback
-- [locateanything.py](/D:/CDAC_PROJECT/CV_Project/locateanything.py:1): LocateAnything query verifier and phrase grounder
-- [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1): LocateAnything grounding + SAM2 segmentation + segmented clip render
+- [qwen_verifier.py](/D:/CDAC_PROJECT/CV_Project/qwen_verifier.py:1): Qwen2.5-VL query verifier and open-world grounder
+- [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1): Qwen2.5-VL grounding + SAM2 segmentation + segmented clip render
 - [clip_generator.py](/D:/CDAC_PROJECT/CV_Project/clip_generator.py:1): clip extraction and browser-ready finalize
 - [report_generator.py](/D:/CDAC_PROJECT/CV_Project/report_generator.py:1): JSON/CSV/HTML/ZIP outputs
 - [cache_utils.py](/D:/CDAC_PROJECT/CV_Project/cache_utils.py:1): Colab Drive-backed cache setup
@@ -274,8 +288,9 @@ It configures cache paths in Colab so:
 - Hugging Face files persist
 - Torch caches persist
 - Ultralytics settings persist
+- YOLO weight files persist
 
-This is important because model download cost is large in Colab.
+This is important because model download cost is large in Colab. After the first successful download into Drive, later Colab sessions should reuse the same cached checkpoints as long as Drive is mounted before running the app.
 
 ## 5A.8 Detailed Tool And Model Responsibilities
 

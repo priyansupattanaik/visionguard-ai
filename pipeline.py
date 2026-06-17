@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -8,7 +9,7 @@ import numpy as np
 
 from cache_utils import setup_cache
 from clip_generator import ClipGenerator
-from locateanything import LocateAnythingVerifier
+from qwen_verifier import QwenFrameVerifier
 from report_generator import ReportGenerator
 from segmenter import GroundedSegmenter
 from tracker import ObjectTracker
@@ -19,12 +20,12 @@ setup_cache()
 
 
 class VisionGuardPipeline:
-    def __init__(self, out_dir="output", yolo="yolo11m.pt", clip_model="google/siglip2-so400m-patch14-384", verifier_model="nvidia/LocateAnything-3B", sam="facebook/sam2.1-hiera-small"):
+    def __init__(self, out_dir="output", yolo="yolo11m.pt", clip_model="google/siglip2-so400m-patch14-384", verifier_model="Qwen/Qwen2.5-VL-7B-Instruct", sam="facebook/sam2.1-hiera-small"):
         self.out_dir = out_dir
         self.trk = ObjectTracker(model=yolo)
         self.enc = SearchEncoder(model=clip_model)
         self.vlm = self.enc
-        self.ver = LocateAnythingVerifier(model=verifier_model)
+        self.ver = QwenFrameVerifier(model=verifier_model)
         self.seg = GroundedSegmenter(sam=sam, verifier_model=verifier_model, verifier=self.ver)
         self.idx = None
         self.run_dir = None
@@ -210,7 +211,7 @@ class VisionGuardPipeline:
             "umbrellas": "umbrella",
         }
         for src, dst in repl.items():
-            q = q.replace(src, dst)
+            q = re.sub(rf"\b{re.escape(src)}\b", dst, q)
         return " ".join(q.split())
 
     def _query_detector_classes(self, q):
@@ -353,8 +354,9 @@ class VisionGuardPipeline:
         return row
 
     def _query_variants(self, q):
+        original = " ".join(q.strip().lower().split())
         ql = self._normalize_query(q)
-        out = [ql]
+        out = [original, ql] if original and original != ql else [ql]
         groups = {
             "accident": [
                 "traffic accident",
@@ -486,25 +488,30 @@ class VisionGuardPipeline:
             result = self.ver.verify_query(rows[i].get("representative_frame_path", rows[i]["frame_path"]), query)
             boxes = result.get("boxes", [])
             caption = result.get("caption", "")
+            matched = bool(result.get("matched"))
+            confidence = float(result.get("confidence", 0.0) or 0.0)
             rows[i]["det_boxes"] = boxes or rows[i].get("det_boxes", [])
             rows[i]["verified_caption"] = caption
             rows[i]["grounded"] = bool(boxes)
-            if boxes:
-                rows[i]["verify_score"] = 1.0
-                rows[i]["score"] = float(rows[i]["score"] + min(0.3, 0.08 * len(boxes) + 0.12))
+            rows[i]["verified_match"] = matched
+            rows[i]["verify_score"] = confidence
+            if matched:
+                rows[i]["score"] = float(rows[i]["score"] + min(0.35, 0.16 + 0.18 * confidence))
                 label = ", ".join(rows[i].get("objects", [])) or query
-                rows[i]["summary"] = f"grounded query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | detected: {label}"
+                detail = caption or f"visible match for {query}"
+                rows[i]["summary"] = f"verified query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
             elif caption:
-                c_vec = self.enc.embed_text(caption)
-                q_vec = self.enc.embed_text(query)
-                vscore = self._cos(q_vec, c_vec)
-                rows[i]["verify_score"] = float(vscore)
-                rows[i]["score"] = float(rows[i]["score"] * 0.85 + max(vscore, 0.0) * 0.15)
-                rows[i]["summary"] = f"visual match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {caption}"
+                rows[i]["score"] = float(rows[i]["score"] * 0.6)
+                rows[i]["low_confidence"] = True
+                rows[i]["summary"] = f"unverified visual candidate at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {caption}"
             else:
-                rows[i]["verify_score"] = 0.0
+                rows[i]["score"] = float(rows[i]["score"] * 0.5)
+                rows[i]["low_confidence"] = True
         rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         return rows
+
+    def _confirmed_rows(self, rows):
+        return [x for x in rows if x.get("verified_match")]
 
     def _cluster_frame_hits(self, rows, top_k, gap_sec):
         rows = sorted(rows, key=lambda x: x["ts"])
@@ -798,15 +805,17 @@ class VisionGuardPipeline:
         }
 
     def search(self, q, top_k=4):
-        q = self._normalize_query(q)
-        qv = self._embed_query(q)
+        raw_q = q.strip()
+        q = self._normalize_query(raw_q)
+        qv = self._embed_query(raw_q)
         ql = q
         qobjs = self._q_objs(q)
         qcolors = set(self._query_colors(q))
         detector_hits = self._refine_detector_hits(q, top_k)
         if detector_hits:
             hits = self._apply_reselection(detector_hits, q, qv, top_n=1)
-            return self._verify_rows(hits, q, top_n=min(2, len(hits)))[:top_k]
+            checked = self._verify_rows(hits, q, top_n=min(2, len(hits)))
+            return self._confirmed_rows(checked)[:top_k]
         frames = self.idx.get("frames", [])
         frame_map = {int(x["frame_id"]): x for x in frames}
         fetch_k = min(max(top_k * 12, 36), len(frames))
@@ -856,11 +865,14 @@ class VisionGuardPipeline:
         out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
         if out:
             out = self._apply_reselection(out, q, qv, top_n=min(2, len(out)))
-            return self._verify_rows(out, q, top_n=min(2, len(out)))[:top_k]
+            verify_n = min(4, len(out)) if not qobjs else min(2, len(out))
+            checked = self._verify_rows(out, q, top_n=verify_n)
+            return self._confirmed_rows(checked)[:top_k]
         obj_hits = self._fallback_object_hits(q, top_k)
         if obj_hits:
             obj_hits = self._apply_reselection(obj_hits, q, qv, top_n=min(2, len(obj_hits)))
-            return self._verify_rows(obj_hits, q, top_n=min(2, len(obj_hits)))[:top_k]
+            checked = self._verify_rows(obj_hits, q, top_n=min(2, len(obj_hits)))
+            return self._confirmed_rows(checked)[:top_k]
         if ranked_rows:
             weak = self._cluster_frame_hits(ranked_rows[: max(top_k * 3, 8)], top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
             for hit in weak:
@@ -868,7 +880,9 @@ class VisionGuardPipeline:
                 hit["low_confidence"] = True
             if weak:
                 weak = self._apply_reselection(weak, q, qv, top_n=min(2, len(weak)))
-                return self._verify_rows(weak, q, top_n=1)
+                verify_n = min(4, len(weak)) if not qobjs else 1
+                checked = self._verify_rows(weak, q, top_n=verify_n)
+                return self._confirmed_rows(checked)[:top_k]
         n = len(self.idx["segments"])
         if n == 0:
             return []
@@ -918,7 +932,9 @@ class VisionGuardPipeline:
                 continue
             out.append(row)
         out = self._apply_reselection(out, q, qv, top_n=min(2, len(out)))
-        return self._verify_rows(out, q, top_n=min(2, len(out)))[:top_k]
+        verify_n = min(4, len(out)) if not qobjs else min(2, len(out))
+        checked = self._verify_rows(out, q, top_n=verify_n)
+        return self._confirmed_rows(checked)[:top_k]
 
     def prepare_hits(self, hits, query):
         out = []
