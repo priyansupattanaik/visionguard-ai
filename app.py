@@ -55,12 +55,12 @@ def _sample_videos():
 
 
 def _in_colab():
-    try:
-        import google.colab  # noqa: F401
-
-        return True
-    except Exception:
-        return False
+    return bool(
+        os.getenv("COLAB_RELEASE_TAG")
+        or os.getenv("COLAB_BACKEND_VERSION")
+        or os.getenv("COLAB_GPU")
+        or os.getenv("JPY_PARENT_PID") and str(ROOT).startswith("/content/")
+    )
 
 
 def _runtime_host():
