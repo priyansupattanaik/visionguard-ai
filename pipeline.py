@@ -8,7 +8,7 @@ import numpy as np
 
 from cache_utils import setup_cache
 from clip_generator import ClipGenerator
-from florence import FlorenceVerifier
+from locateanything import LocateAnythingVerifier
 from report_generator import ReportGenerator
 from segmenter import GroundedSegmenter
 from tracker import ObjectTracker
@@ -19,13 +19,13 @@ setup_cache()
 
 
 class VisionGuardPipeline:
-    def __init__(self, out_dir="output", yolo="yolo11m.pt", clip_model="google/siglip2-so400m-patch14-384", florence_model="microsoft/Florence-2-large", sam="facebook/sam2.1-hiera-small"):
+    def __init__(self, out_dir="output", yolo="yolo11m.pt", clip_model="google/siglip2-so400m-patch14-384", verifier_model="nvidia/LocateAnything-3B", sam="facebook/sam2.1-hiera-small"):
         self.out_dir = out_dir
         self.trk = ObjectTracker(model=yolo)
         self.enc = SearchEncoder(model=clip_model)
         self.vlm = self.enc
-        self.ver = FlorenceVerifier(model=florence_model)
-        self.seg = GroundedSegmenter(sam=sam, florence_model=florence_model, florence=self.ver)
+        self.ver = LocateAnythingVerifier(model=verifier_model)
+        self.seg = GroundedSegmenter(sam=sam, verifier_model=verifier_model, verifier=self.ver)
         self.idx = None
         self.run_dir = None
         self.clip = None
@@ -481,19 +481,28 @@ class VisionGuardPipeline:
     def _verify_rows(self, rows, query, top_n=1):
         if not rows:
             return rows
-        q_text_vec = self.enc.embed_text(query)
         take = min(top_n, len(rows))
         for i in range(take):
-            caption = self.ver.verify_frame(rows[i].get("representative_frame_path", rows[i]["frame_path"]))
+            result = self.ver.verify_query(rows[i].get("representative_frame_path", rows[i]["frame_path"]), query)
+            boxes = result.get("boxes", [])
+            caption = result.get("caption", "")
+            rows[i]["det_boxes"] = boxes or rows[i].get("det_boxes", [])
             rows[i]["verified_caption"] = caption
-            if not caption:
+            rows[i]["grounded"] = bool(boxes)
+            if boxes:
+                rows[i]["verify_score"] = 1.0
+                rows[i]["score"] = float(rows[i]["score"] + min(0.3, 0.08 * len(boxes) + 0.12))
+                label = ", ".join(rows[i].get("objects", [])) or query
+                rows[i]["summary"] = f"grounded query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | detected: {label}"
+            elif caption:
+                c_vec = self.enc.embed_text(caption)
+                q_vec = self.enc.embed_text(query)
+                vscore = self._cos(q_vec, c_vec)
+                rows[i]["verify_score"] = float(vscore)
+                rows[i]["score"] = float(rows[i]["score"] * 0.85 + max(vscore, 0.0) * 0.15)
+                rows[i]["summary"] = f"visual match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {caption}"
+            else:
                 rows[i]["verify_score"] = 0.0
-                continue
-            c_vec = self.enc.embed_text(caption)
-            vscore = self._cos(q_text_vec, c_vec)
-            rows[i]["verify_score"] = float(vscore)
-            rows[i]["score"] = float(rows[i]["score"] * 0.75 + max(vscore, 0.0) * 0.25)
-            rows[i]["summary"] = f"best matching sampled frame at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {caption}"
         rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         return rows
 
@@ -796,9 +805,8 @@ class VisionGuardPipeline:
         qcolors = set(self._query_colors(q))
         detector_hits = self._refine_detector_hits(q, top_k)
         if detector_hits:
-            return self._apply_reselection(detector_hits, q, qv, top_n=1)
-        if qobjs and self._is_strict_object_query(q):
-            return []
+            hits = self._apply_reselection(detector_hits, q, qv, top_n=1)
+            return self._verify_rows(hits, q, top_n=min(2, len(hits)))[:top_k]
         frames = self.idx.get("frames", [])
         frame_map = {int(x["frame_id"]): x for x in frames}
         fetch_k = min(max(top_k * 12, 36), len(frames))
@@ -847,18 +855,20 @@ class VisionGuardPipeline:
         rows = [x for x in ranked_rows if x["score"] >= 0.14]
         out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
         if out:
-            out = self._verify_rows(out, q, top_n=1)[:top_k]
-            return self._apply_reselection(out, q, qv, top_n=1)
+            out = self._apply_reselection(out, q, qv, top_n=min(2, len(out)))
+            return self._verify_rows(out, q, top_n=min(2, len(out)))[:top_k]
         obj_hits = self._fallback_object_hits(q, top_k)
         if obj_hits:
-            return self._apply_reselection(obj_hits, q, qv, top_n=1)
+            obj_hits = self._apply_reselection(obj_hits, q, qv, top_n=min(2, len(obj_hits)))
+            return self._verify_rows(obj_hits, q, top_n=min(2, len(obj_hits)))[:top_k]
         if ranked_rows:
             weak = self._cluster_frame_hits(ranked_rows[: max(top_k * 3, 8)], top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
             for hit in weak:
                 hit["summary"] = f"low-confidence visual match at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects']) if hit['objects'] else 'no tracked objects'}"
                 hit["low_confidence"] = True
             if weak:
-                return self._apply_reselection(weak, q, qv, top_n=1)
+                weak = self._apply_reselection(weak, q, qv, top_n=min(2, len(weak)))
+                return self._verify_rows(weak, q, top_n=1)
         n = len(self.idx["segments"])
         if n == 0:
             return []
@@ -907,8 +917,8 @@ class VisionGuardPipeline:
             if row["score"] < 0.18:
                 continue
             out.append(row)
-        out = self._verify_rows(out, q, top_n=1)[:top_k]
-        return self._apply_reselection(out, q, qv, top_n=1)
+        out = self._apply_reselection(out, q, qv, top_n=min(2, len(out)))
+        return self._verify_rows(out, q, top_n=min(2, len(out)))[:top_k]
 
     def prepare_hits(self, hits, query):
         out = []

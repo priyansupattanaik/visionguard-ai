@@ -3,7 +3,6 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoModel, AutoProcessor
 
 
 class SearchEncoder:
@@ -16,6 +15,8 @@ class SearchEncoder:
     def load(self):
         if self.m is not None:
             return
+        from transformers import AutoModel, AutoProcessor
+
         self.p = AutoProcessor.from_pretrained(self.model_name)
         self.m = AutoModel.from_pretrained(self.model_name, device_map="auto" if self.dev == "cuda" else None)
         if self.dev != "cuda":

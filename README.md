@@ -18,7 +18,7 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 |---|---|
 | Detection + Tracking | YOLO11m + BoT-SORT |
 | Retrieval | SigLIP2 So400m/14 384 |
-| Verification + Grounding | Florence-2-large |
+| Verification + Grounding | LocateAnything-3B |
 | Segmentation | SAM2.1-hiera-small |
 | Vector Index | turbovec IdMapIndex |
 
@@ -28,7 +28,8 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 - Repeated queries without rescanning
 - Object-aware retrieval (person, car, truck, bus, motorcycle, bicycle, umbrella)
 - Color-object queries for supported vehicle classes (yellow car, white bus)
-- Grounding box on top-1 result at search time
+- Grounded query verification on top matches at search time
+- Bounding boxes drawn on matched frames when the query can be grounded
 - Exact frame re-selection within matched windows
 - Segmented clip and region mask on export
 - Fast shortlist retrieval with turbovec after scan-time indexing is complete
@@ -40,7 +41,7 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 - Queries shorter than 3 words or very abstract queries (unusual activity, suspicious thing)
   will return weaker results.
 - Very long videos increase scan time linearly. This is expected behavior.
-- First-run startup is slower because YOLO11m, SigLIP2, and Florence-2-large must load before retrieval becomes responsive.
+- First-run startup is slower because YOLO11m, SigLIP2, LocateAnything-3B, and SAM2 checkpoints must load before the full stack becomes responsive.
 
 ## Setup
 

@@ -6,27 +6,28 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
-from transformers import Sam2Model, Sam2Processor
-from florence import FlorenceVerifier
+from locateanything import LocateAnythingVerifier
 
 
 class GroundedSegmenter:
-    def __init__(self, sam="facebook/sam2.1-hiera-small", florence_model="microsoft/Florence-2-large", florence=None, device=None):
+    def __init__(self, sam="facebook/sam2.1-hiera-small", verifier_model="nvidia/LocateAnything-3B", verifier=None, device=None):
         self.sam_name = sam
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.flo = florence or FlorenceVerifier(model=florence_model, device=self.dev)
+        self.ver = verifier or LocateAnythingVerifier(model=verifier_model, device=self.dev)
         self.sp = None
         self.sm = None
 
     def load(self):
         if self.sm is None:
+            from transformers import Sam2Model, Sam2Processor
+
             self.sp = Sam2Processor.from_pretrained(self.sam_name)
             self.sm = Sam2Model.from_pretrained(self.sam_name, device_map="auto" if self.dev == "cuda" else None)
             if self.dev != "cuda":
                 self.sm.to(self.dev)
 
     def detect(self, frame_path, query, fallback_boxes=None):
-        boxes = self.flo.ground_phrase(frame_path, query.strip().lower())
+        boxes = self.ver.ground_phrase(frame_path, query.strip().lower())
         if not boxes:
             boxes = fallback_boxes or []
         scores = [max(0.15, 1.0 - 0.08 * i) for i in range(len(boxes))]

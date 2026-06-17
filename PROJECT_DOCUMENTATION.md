@@ -1,5 +1,21 @@
 # Vision Guard Project Documentation
 
+## Current Runtime Stack
+
+This section is the authoritative description of the current backend.
+
+- retrieval encoder: `google/siglip2-so400m-patch14-384`
+- detector: `yolo11m.pt`
+- verifier + grounder: `nvidia/LocateAnything-3B`
+- segmenter: `facebook/sam2.1-hiera-small`
+- vector retrieval backend: `turbovec` with NumPy fallback
+
+## Current Architecture Note
+
+The live runtime no longer uses `Florence-2-large` as the active verifier/grounder.
+If older sections below mention Florence, treat those as historical notes from an earlier revision.
+The current source of truth for verification and grounding is [locateanything.py](/D:/CDAC_PROJECT/CV_Project/locateanything.py:1).
+
 ## 1. Project Summary
 
 Vision Guard is a scan-first CCTV video search system.
@@ -43,7 +59,7 @@ The current app flow is:
 5. Click `step 2: find matches`.
 6. The system searches indexed sampled frames, clusters them into clip candidates, verifies the top candidates, and returns top time ranges.
 7. The UI shows the matched-frame gallery and timestamp table immediately.
-8. After search, the top-1 matched frame is shown with grounding boxes drawn if Florence-2 phrase grounding succeeds. For detector-supported classes, YOLO scan-time boxes are used as fallback.
+8. After search, the top matched frame is shown with grounding boxes drawn if LocateAnything grounds the query phrase on that frame. For detector-supported classes, stored YOLO boxes may still appear when they align with the query.
 9. No clip is generated just to view a result.
 10. Clip generation, grounding, and segmentation happen only when selected results are exported.
 11. Selected clips and reports can be exported.
@@ -68,8 +84,8 @@ Current main files:
 - [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1): YOLO11m + BoT-SORT object tracking
 - [vlm.py](/D:/CDAC_PROJECT/CV_Project/vlm.py:1): text-frame embedding search
 - [vector_index.py](/D:/CDAC_PROJECT/CV_Project/vector_index.py:1): `turbovec`-backed frame and segment vector indexes with NumPy fallback
-- [florence.py](/D:/CDAC_PROJECT/CV_Project/florence.py:1): Florence-2 top-k verifier and caption generator
-- [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1): Florence-2 grounding + SAM2 segmentation + segmented clip render
+- [locateanything.py](/D:/CDAC_PROJECT/CV_Project/locateanything.py:1): LocateAnything query verifier and phrase grounder
+- [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1): LocateAnything grounding + SAM2 segmentation + segmented clip render
 - [clip_generator.py](/D:/CDAC_PROJECT/CV_Project/clip_generator.py:1): clip extraction and browser-ready finalize
 - [report_generator.py](/D:/CDAC_PROJECT/CV_Project/report_generator.py:1): JSON/CSV/HTML/ZIP outputs
 - [cache_utils.py](/D:/CDAC_PROJECT/CV_Project/cache_utils.py:1): Colab Drive-backed cache setup
