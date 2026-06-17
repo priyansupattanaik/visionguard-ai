@@ -3,7 +3,7 @@
 Vision Guard is a scan-first CCTV video search app with a Gradio UI.
 It scans a video once, builds a searchable index, and then lets you ask natural-language questions about that video.
 
-For the full architecture, runtime flow, model stack, limitations, and Colab instructions, read:
+The audited source-of-truth project documentation is:
 
 - [PROJECT_DOCUMENTATION.md](D:/CDAC_PROJECT/CV_Project/PROJECT_DOCUMENTATION.md)
 

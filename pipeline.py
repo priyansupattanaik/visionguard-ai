@@ -842,11 +842,6 @@ class VisionGuardPipeline:
             })
             seg_chunk_vecs.append(emb)
             seg_chunk_ids.append(np.uint64(len(segs) - 1))
-            if len(seg_chunk_vecs) >= index_chunk_size:
-                seg_vec_chunks.append(np.ascontiguousarray(np.stack(seg_chunk_vecs).astype(np.float32)))
-                seg_id_chunks.append(np.asarray(seg_chunk_ids, dtype=np.uint64))
-                seg_chunk_vecs = []
-                seg_chunk_ids = []
         if seg_chunk_vecs:
             seg_vec_chunks.append(np.ascontiguousarray(np.stack(seg_chunk_vecs).astype(np.float32)))
             seg_id_chunks.append(np.asarray(seg_chunk_ids, dtype=np.uint64))
