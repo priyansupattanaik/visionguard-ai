@@ -43,6 +43,27 @@ class SegmentVectorIndex:
             self.idx = None
             self.backend = "numpy"
 
+    def build_merged(self, chunks, path=None):
+        vec_parts = []
+        id_parts = []
+        for vecs, ids in chunks:
+            arr = np.asarray(vecs, dtype=np.float32)
+            ext_ids = np.asarray(ids, dtype=np.uint64)
+            if arr.size == 0 or ext_ids.size == 0:
+                continue
+            if arr.ndim != 2:
+                raise ValueError("chunk vectors must be a 2D float32 array")
+            if arr.shape[0] != ext_ids.shape[0]:
+                raise ValueError("chunk vectors and ids length mismatch")
+            vec_parts.append(arr)
+            id_parts.append(ext_ids)
+        if not vec_parts:
+            self.build(np.zeros((0, 0), dtype=np.float32), np.zeros((0,), dtype=np.uint64), path=path)
+            return
+        merged_vecs = np.ascontiguousarray(np.concatenate(vec_parts, axis=0))
+        merged_ids = np.ascontiguousarray(np.concatenate(id_parts, axis=0))
+        self.build(merged_vecs, merged_ids, path=path)
+
     def search(self, query, k):
         q = np.asarray(query, dtype=np.float32).reshape(1, -1)
         if self.backend == "turbovec" and self.idx is not None and len(self.ids):

@@ -1,4 +1,5 @@
 import os
+import threading
 import warnings
 
 import gradio as gr
@@ -12,6 +13,7 @@ warnings.filterwarnings("ignore", category=UserWarning, message="The parameters 
 warnings.filterwarnings("ignore", message="The 'theme' parameter in the Blocks constructor will be removed in Gradio 6\\.0.*")
 warnings.filterwarnings("ignore", message="The 'css' parameter in the Blocks constructor will be removed in Gradio 6\\.0.*")
 pipe = VisionGuardPipeline()
+threading.Thread(target=pipe.warmup_models, daemon=True).start()
 theme = gr.themes.Soft(primary_hue="cyan", secondary_hue="slate")
 css = """
 .gradio-container{max-width:1240px!important}
@@ -84,14 +86,8 @@ def scan_only(video):
     yield "scan complete", None, _meta(meta), gr.update(interactive=True), "", []
 
 
-def find_query(q):
+def _find_payload(status, q, seg):
     blank_pick = gr.update(choices=[], value=[])
-    if not pipe.idx:
-        return "scan a video first", "", "", [], blank_pick, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
-    if not q or not q.strip():
-        return "enter a natural-language query", "", "", [], blank_pick, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
-    hits = pipe.search(q.strip(), top_k=4)
-    seg = pipe.prepare_hits(hits, q.strip())
     searched_for = ", ".join(pipe._query_variants(q.strip()))
     rows = [[round(x.get("peak_ts", x["start"]), 2), f"{x['start']:.2f}s - {x['end']:.2f}s", ", ".join(x["objects"]), x["summary"]] for x in seg]
     ans = _ans(q.strip(), seg)
@@ -103,7 +99,27 @@ def find_query(q):
         note = "### matched frames\n\nThe gallery below shows the nearest available sampled frames. These results are low confidence, so review them carefully before export."
     else:
         note = "### matched frames\n\nThe gallery below shows the top sampled frames for your query. Select any rows you want to export as clips and reports."
-    return "matches ready", ans, f"Searched for: {searched_for}", rows, gr.update(choices=choices, value=choices[:1]), gal, note, q.strip(), seg, gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+    return status, ans, f"Searched for: {searched_for}", rows, gr.update(choices=choices, value=choices[:1]), gal, note, q.strip(), seg, gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+
+
+def find_query(q):
+    blank_pick = gr.update(choices=[], value=[])
+    if not pipe.idx:
+        yield "scan a video first", "", "", [], blank_pick, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+        return
+    if not q or not q.strip():
+        yield "enter a natural-language query", "", "", [], blank_pick, [], "", "", [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+        return
+    yield "searching...", "", "", [], blank_pick, [], "", q.strip(), [], gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=False, value=None)
+    yielded = False
+    for hits in pipe.search_stream(q.strip(), top_k=4):
+        seg = pipe.prepare_hits(hits, q.strip())
+        status = "matches ready" if seg else "search complete"
+        yield _find_payload(status, q.strip(), seg)
+        yielded = True
+    if not yielded:
+        seg = pipe.prepare_hits(pipe.search(q.strip(), top_k=4), q.strip())
+        yield _find_payload("matches ready" if seg else "search complete", q.strip(), seg)
 
 
 def export_selected(picks, q, hits):

@@ -10,7 +10,7 @@ from qwen_verifier import QwenFrameVerifier
 
 
 class GroundedSegmenter:
-    def __init__(self, sam="facebook/sam2.1-hiera-small", verifier_model="Qwen/Qwen2.5-VL-7B-Instruct", verifier=None, device=None):
+    def __init__(self, sam="facebook/sam2.1-hiera-small", verifier_model="Qwen/Qwen2.5-VL-7B-Instruct-AWQ", verifier=None, device=None):
         self.sam_name = sam
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.ver = verifier or QwenFrameVerifier(model=verifier_model, device=self.dev)

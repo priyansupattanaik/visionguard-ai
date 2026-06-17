@@ -10,12 +10,13 @@ from ultralytics import YOLO
 
 
 class ObjectTracker:
-    def __init__(self, model="yolo11m.pt", conf=0.22, imgsz=960, tracker="botsort.yaml", device=None):
+    def __init__(self, model="yolo11n.pt", conf=0.22, imgsz=512, tracker="botsort.yaml", device=None):
         self.model_name = model
         self.conf = conf
         self.imgsz = imgsz
         self.tracker = tracker
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.use_half = self.dev == "cuda"
         self.m = None
 
     def reset(self):
@@ -64,6 +65,7 @@ class ObjectTracker:
             verbose=False,
             conf=self.conf,
             imgsz=self.imgsz,
+            half=self.use_half,
             tracker=self.tracker,
             classes=cls,
         )
@@ -92,6 +94,7 @@ class ObjectTracker:
             verbose=False,
             conf=self.conf if conf is None else conf,
             imgsz=self.imgsz,
+            half=self.use_half,
             classes=cls,
         )
         out = []
@@ -109,3 +112,32 @@ class ObjectTracker:
                     "name": self.m.names.get(int(ci), str(ci)),
                 })
         return out
+
+    def detect_batch(self, frames, cls=None, conf=None):
+        self.load()
+        if not frames:
+            return []
+        res = self.m.predict(
+            frames,
+            verbose=False,
+            conf=self.conf if conf is None else conf,
+            imgsz=self.imgsz,
+            half=self.use_half,
+            classes=cls,
+        )
+        batch = []
+        for r in res:
+            rows = []
+            if r.boxes is not None:
+                boxes = r.boxes.xyxy.cpu().tolist()
+                confs = r.boxes.conf.cpu().tolist()
+                clss = r.boxes.cls.int().cpu().tolist()
+                for box, cf, ci in zip(boxes, confs, clss):
+                    rows.append({
+                        "box": [round(x, 2) for x in box],
+                        "conf": round(float(cf), 4),
+                        "cls": int(ci),
+                        "name": self.m.names.get(int(ci), str(ci)),
+                    })
+            batch.append(rows)
+        return batch

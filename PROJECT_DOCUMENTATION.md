@@ -5,15 +5,14 @@
 This section is the authoritative description of the current backend.
 
 - retrieval encoder: `google/siglip2-so400m-patch14-384`
-- detector: `yolo11m.pt`
-- verifier + grounder: `Qwen/Qwen2.5-VL-7B-Instruct`
+- detector: `yolo11n.pt`
+- verifier + grounder: `Qwen/Qwen2.5-VL-7B-Instruct-AWQ`
 - segmenter: `facebook/sam2.1-hiera-small`
 - vector retrieval backend: `turbovec` with NumPy fallback
 
 ## Current Architecture Note
 
-The live runtime no longer uses `Florence-2-large` or `LocateAnything-3B` as the active verifier/grounder.
-If older sections below mention those models, treat those as historical notes from earlier revisions.
+The live runtime no longer uses `Florence-2-large`, `LocateAnything-3B`, or `Grounding DINO` as the active verifier/grounder.
 The current source of truth for verification and grounding is [qwen_verifier.py](/D:/CDAC_PROJECT/CV_Project/qwen_verifier.py:1).
 
 ## Open-World Retrieval Rule
@@ -29,6 +28,23 @@ Current query behavior:
 5. If no candidate is confirmed, the UI reports no strong match instead of showing an unverified frame.
 
 YOLO metadata is still kept for speed and visible-object context, but it is no longer the final authority for arbitrary natural-language queries.
+
+## Current Scan Defaults
+
+- default `sample_sec`: `1.25`
+- cheap prefilter before heavy models: frame-to-frame thumbnail difference
+- near-duplicate/static sampled frames are skipped before YOLO and SigLIP2 run
+- forced keep interval prevents the scan from going silent during long static periods
+- SigLIP2 image embedding uses larger CUDA batches and guarded `torch.compile` on the vision tower
+- frame and segment vectors are accumulated in chunks before the final turbovec build
+
+## Current Query Defaults
+
+- heavy models warm up in a background thread when the app starts
+- Qwen verification is cached by stable frame key plus normalized query
+- the app streams the first confirmed matches instead of waiting for the whole query batch
+- `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` is the default verifier model
+- `vllm` is used automatically when available on supported GPU runtimes, otherwise the verifier falls back to Hugging Face generation
 
 ## 1. Project Summary
 
@@ -95,7 +111,7 @@ Current main files:
 
 - [app.py](/D:/CDAC_PROJECT/CV_Project/app.py:1): Gradio UI and user flow
 - [pipeline.py](/D:/CDAC_PROJECT/CV_Project/pipeline.py:1): end-to-end video indexing, search, background clip prep, export
-- [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1): YOLO11m + BoT-SORT object tracking
+- [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1): YOLO11n + BoT-SORT object detection and lightweight tracking metadata
 - [vlm.py](/D:/CDAC_PROJECT/CV_Project/vlm.py:1): text-frame embedding search
 - [vector_index.py](/D:/CDAC_PROJECT/CV_Project/vector_index.py:1): `turbovec`-backed frame and segment vector indexes with NumPy fallback
 - [qwen_verifier.py](/D:/CDAC_PROJECT/CV_Project/qwen_verifier.py:1): Qwen2.5-VL query verifier and open-world grounder
@@ -135,10 +151,10 @@ Main layers:
 flowchart LR
     UI["Gradio UI<br/>app.py"]
     PIPE["Pipeline Orchestrator<br/>pipeline.py"]
-    DET["YOLO11m + BoT-SORT<br/>tracker.py"]
+    DET["YOLO11n + BoT-SORT<br/>tracker.py"]
     RET["SigLIP2 Encoder<br/>vlm.py"]
     IDX["turbovec / NumPy Index<br/>vector_index.py"]
-    FLO["Florence-2-large<br/>florence.py"]
+    QWEN["Qwen2.5-VL-7B-Instruct-AWQ<br/>qwen_verifier.py"]
     SEG["SAM2 Segmenter<br/>segmenter.py"]
     CLIP["Clip + Report Export<br/>clip_generator.py + report_generator.py"]
     CACHE["Drive / HF / Torch Cache<br/>cache_utils.py"]
@@ -147,8 +163,8 @@ flowchart LR
     PIPE --> DET
     PIPE --> RET
     RET --> IDX
-    PIPE --> FLO
-    FLO --> SEG
+    PIPE --> QWEN
+    QWEN --> SEG
     PIPE --> CLIP
     CACHE --> PIPE
 ```
@@ -160,7 +176,7 @@ What this diagram means:
 - YOLO handles scan-time object detection
 - SigLIP2 handles text-frame retrieval
 - turbovec stores searchable vectors
-- Florence-2-large handles verification and grounding
+- Qwen2.5-VL handles verification and grounding
 - SAM2 is only used for export-time mask refinement
 - cache setup reduces repeated download cost in Colab
 
@@ -208,7 +224,7 @@ The vision analysis layer is split across:
 
 - [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:1)
 - [vlm.py](/D:/CDAC_PROJECT/CV_Project/vlm.py:1)
-- [florence.py](/D:/CDAC_PROJECT/CV_Project/florence.py:1)
+- [qwen_verifier.py](/D:/CDAC_PROJECT/CV_Project/qwen_verifier.py:1)
 - [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:1)
 
 Each module owns one kind of model behavior instead of mixing everything in one file.
@@ -221,7 +237,7 @@ It uses:
 
 - SigLIP2 embedding similarity
 - `turbovec` `IdMapIndex` for the primary dense frame lookup
-- Florence-2-large verification on top candidates
+- Qwen2.5-VL verification on top candidates
 - query-object overlap boosts
 - deduplication of near-identical windows
 
@@ -239,7 +255,7 @@ Why each stage exists:
 - YOLO is used because scan-time object detection is cheaper and more stable than asking a large VLM to inspect every sampled frame
 - SigLIP2 is used because retrieval needs fast text-image similarity, not long-form generation
 - turbovec is used because ANN lookup is faster than rescoring every indexed vector in Python after the scan is done
-- Florence-2-large is used because verification and grounding are expensive, so they are applied only after retrieval narrows the search
+- Qwen2.5-VL is used because verification and grounding are expensive, so they are applied only after retrieval narrows the search
 - SAM2 is used only after a match exists because full-video segmentation would be too expensive
 
 When this architecture works best:
@@ -262,7 +278,7 @@ Its job starts only after a match is already found.
 
 It uses:
 
-- Florence-2-large for primary grounding
+- Qwen2.5-VL for primary grounding
 - SAM2 for masks
 
 ### 5A.6 Export and Reporting Layer
@@ -310,20 +326,21 @@ Why it exists here:
 
 - it is the UI layer for local runs, Colab, and Hugging Face Spaces
 
-### OpenCV
+### Decord + OpenCV
 
 Used for:
 
-- frame-by-frame video reading
+- batched sampled-frame video reading through Decord
 - preview overlay rendering
 - sampled frame saving
 - raw and segmented clip writing
 
 Why it exists here:
 
-- it is the video I/O and frame processing backbone of the repo
+- Decord is the scan-time video reader
+- OpenCV remains the frame-processing and export helper
 
-### YOLO11m
+### YOLO11n
 
 Used for:
 
@@ -332,7 +349,7 @@ Used for:
 
 Why it exists here:
 
-- it is fast enough for broad scan-time object presence signals
+- it is fast enough for broad scan-time object presence signals while keeping indexing latency lower than larger YOLO variants
 
 ### BoT-SORT
 
@@ -368,7 +385,7 @@ Why it exists here:
 
 - it is lighter than a full vector database for this one-video-per-run workflow
 
-### Florence-2
+### Qwen2.5-VL
 
 Used for:
 
@@ -380,7 +397,7 @@ Why it exists here:
 
 - it improves shortlist quality without forcing a heavy model over every sampled frame during scan
 
-### Florence-2-large
+### Qwen2.5-VL-AWQ
 
 Used for:
 
@@ -389,7 +406,7 @@ Used for:
 
 Why it exists here:
 
-- one Florence model now handles both shortlist verification and grounding
+- one verifier model now handles both shortlist verification and grounding
 - it answers where the queried object or region is inside a matched frame
 
 ### SAM2
@@ -423,18 +440,19 @@ This section describes how the backend actually processes a request.
 ```mermaid
 flowchart TD
     A["Upload Video"] --> B["Scan Video"]
-    B --> C["Sample Frames Every 0.75s"]
-    C --> D["YOLO11m Detection"]
+    B --> C["Sample Frames Every 1.25s"]
+    C --> C1["Cheap Motion / Duplicate Prefilter"]
+    C1 --> D["YOLO11n Detection"]
     D --> E["SigLIP2 Frame Embeddings"]
     E --> F["Write Frame / Segment Index"]
     F --> G["Enter Natural-Language Query"]
     G --> H["Embed Query With SigLIP2"]
     H --> I["turbovec Top-K Retrieval"]
     I --> J["Cluster Nearby Hits"]
-    J --> K["Florence-2 Verification (Top-1)"]
+    J --> K["Qwen2.5-VL Verification (Streamed Top-K)"]
     K --> L["Query-Time Frame Re-selection (0.1s inside matched window)"]
-    L --> M["Florence-2 Grounding On Top-1"]
-    M --> N["YOLO Box Fallback If Needed"]
+    L --> M["Qwen2.5-VL Grounding On Top-1"]
+    M --> N["Stored YOLO Box Fallback If Needed"]
     N --> O["Show Matched Frames + Timestamps"]
     O --> P["Optional Export"]
     P --> Q["Clip Extraction"]
@@ -456,19 +474,18 @@ When `python app.py` starts:
 1. `setup_cache()` runs first.
 2. The `VisionGuardPipeline` object is created.
 3. The Gradio UI tree is created.
-4. No heavy model is loaded immediately just because the app started.
-
-The models use lazy loading.
+4. A background warm-up thread starts loading the heavy models.
 
 That means:
 
 - the app object is created first
-- models load when their first real task is called
+- the warm-up thread starts after UI construction
+- first-use latency is reduced because the main models are prepared in the background
 
 Why:
 
-- faster startup
-- avoids loading every model if the user never reaches a later stage
+- faster first query and export
+- smoother user experience on Colab and local GPU runs
 
 ### 5B.2 What Happens During Scan
 
@@ -480,18 +497,19 @@ Inside `index_video_iter(...)`:
 
 1. A new run folder is created under `output/`.
 2. The tracker state is reset.
-3. OpenCV opens the source video.
+3. Decord opens the source video.
 4. Video metadata is read:
    - fps
    - frame count
    - duration
 5. The sampling stride is computed from `sample_sec`.
-6. The video is read frame by frame.
-7. Only sampled frames are sent into the heavy semantic indexing path.
+6. The video is sampled in batches with indexed access.
+7. A cheap thumbnail-difference prefilter removes near-duplicate or static frames before heavy models run.
+8. Only kept sampled frames are sent into the heavy semantic indexing path.
 
 For each sampled frame:
 
-1. YOLO11m + BoT-SORT produce tracked objects.
+1. YOLO11n + BoT-SORT produce tracked objects.
 2. Object counts and ids are collected.
 3. Obvious low-content intro or title-card frames without detections are skipped.
 4. A live preview overlay is drawn.
@@ -536,6 +554,7 @@ Each indexed frame stores:
 - object names
 - track ids
 - per-frame detection boxes and confidences for tracked objects
+- temporal metadata such as motion score, keep reason, object delta, and still-people count
 
 Each indexed window stores:
 
@@ -547,6 +566,7 @@ Each indexed window stores:
 - representative frame path
 - object names
 - track ids
+- aggregated temporal statistics used later for analysis and debugging
 
 This in-memory index is the reason repeated queries are possible without rescanning.
 
@@ -601,7 +621,7 @@ When the user clicks `step 2: find matches`:
 4. `turbovec` searches the persisted frame embedding index.
 5. Query-object overlap adds a small boost or penalty.
 6. Nearby high-scoring sampled frames are clustered into clip candidates.
-7. Florence-2-large verifies the top candidates and improves the returned descriptions.
+7. Qwen2.5-VL verifies the top candidates, caches results by frame id plus query, and improves the returned descriptions.
 
 This stage is search only.
 
@@ -720,22 +740,22 @@ This avoids returning many nearly identical rows for the same event moment.
 For each cluster in the top hits, the video is re-read densely at 0.1s intervals inside the cluster's time range.
 The frame with the highest SigLIP2 cosine similarity to the query vector is selected as the hit's displayed frame and its timestamp becomes the reported moment.
 
-### Step 8. Florence-2 verification
+### Step 8. Qwen2.5-VL verification
 
-Only the top candidate frames are passed into Florence-2-large.
+Only the top candidate frames are passed into Qwen2.5-VL.
 
-Florence-2-large generates a richer description of those shortlisted frames.
+Qwen2.5-VL generates a richer description of those shortlisted frames.
 
 That verification output is then used to:
 
 - improve the summary shown to the user
 - contribute a second semantic signal for reranking the shortlist
 
-### Step 8A. Florence-2 phrase grounding on top-1 result
+### Step 8A. Qwen2.5-VL phrase grounding on top-1 result
 
-The top-1 hit's re-selected frame is passed to Florence-2-large with CAPTION_TO_PHRASE_GROUNDING.
+The top-1 hit's re-selected frame is passed to Qwen2.5-VL for phrase grounding.
 If boxes are returned, they are drawn onto the frame and the result is shown in the gallery.
-If Florence returns empty and the query maps to a detector-supported class, YOLO scan-time boxes stored at index time are used instead.
+If Qwen grounding returns empty and the query maps to a detector-supported class, YOLO scan-time boxes stored at index time are used instead.
 
 ### Step 9. Final result rows
 
@@ -814,7 +834,7 @@ This is why the current UI stays frame-first while still supporting clip/report 
 
 For matched frames:
 
-1. Florence-2-large phrase grounding is called with `<CAPTION_TO_PHRASE_GROUNDING>`.
+1. Qwen2.5-VL phrase grounding is called for the matched frame and the query phrase.
 2. It receives the matched frame plus the query phrase.
 3. It returns grounded pixel boxes for the requested phrase.
 4. Those boxes are passed into SAM2.
@@ -866,7 +886,7 @@ The backend therefore treats export as a finalization stage.
 
 Conceptual backend data flow:
 
-`video path -> sampled frames -> tracking/meta -> embeddings -> frame index + window index -> query expansion -> query embedding -> frame retrieval -> candidate clustering -> Florence verification -> raw clips -> grounded boxes -> masks -> exports`
+`video path -> sampled frames -> tracking/meta -> embeddings -> frame index + window index -> query expansion -> query embedding -> frame retrieval -> candidate clustering -> Qwen verification -> raw clips -> grounded boxes -> masks -> exports`
 
 This is the shortest accurate summary of the backend processing chain.
 
@@ -886,8 +906,8 @@ What happens:
 4. Stored scan-time detections are searched first.
 5. Matching frames are ranked.
 6. The top hit is re-read densely inside its clip window.
-7. Florence-2-large tries to ground `umbrella` on that top frame.
-8. If Florence grounding is empty, stored YOLO boxes are used as fallback.
+7. Qwen2.5-VL tries to ground `umbrella` on that top frame.
+8. If Qwen grounding is empty, stored YOLO boxes are used as fallback.
 
 Why this is good:
 
@@ -916,7 +936,7 @@ What happens:
 
 1. The query expands to variants such as `traffic accident`, `vehicle collision`, `car crash`.
 2. SigLIP2 retrieves visually similar candidate frames and windows.
-3. Florence-2-large verifies the top result description.
+3. Qwen2.5-VL verifies the top result description.
 4. The system returns the most similar matched frames and timestamps.
 
 What this does not mean:
@@ -936,7 +956,7 @@ The pipeline does not semantically embed every frame.
 
 It samples frames every `sample_sec` seconds. Current default:
 
-- `sample_sec = 0.75`
+- `sample_sec = 1.25`
 
 Why:
 
@@ -964,7 +984,7 @@ This is handled by [tracker.py](/D:/CDAC_PROJECT/CV_Project/tracker.py:11).
 
 Current tracker stack:
 
-- model: `yolo11m.pt`
+- model: `yolo11n.pt`
 - tracker: `botsort.yaml`
 
 Why used:
@@ -1039,7 +1059,7 @@ When the user enters a query:
 3. `turbovec` returns top sampled frames.
 4. Lightweight object-aware reranking is applied.
 5. Nearby top sampled frames are clustered into clip candidates.
-6. Florence-2 verifies the top candidates and improves descriptions.
+6. Qwen2.5-VL verifies the top candidates and improves descriptions.
 7. Final rows are returned with `moment`, `start`, and `end`.
 
 This is a frame-first retrieval pipeline.
@@ -1077,18 +1097,18 @@ Why:
 
 Matched clips use a layered localization design in [segmenter.py](/D:/CDAC_PROJECT/CV_Project/segmenter.py:12):
 
-1. `Florence-2-large` grounds the natural-language phrase.
+1. `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` grounds the natural-language phrase.
 2. SAM2 segments the grounded boxes.
 3. The project renders segmented preview frames and a segmented clip.
 
 Why this hybrid design:
 
-- `Florence-2-large` is strong enough to verify frames and ground phrases within one model family
+- `Qwen2.5-VL` is strong enough to verify frames and ground phrases within one model family
 - SAM2 gives region masks, not just boxes
 
 Important limitation:
 
-- Florence grounding improves localization, not temporal event recognition
+- Qwen grounding improves localization, not temporal event recognition
 - SAM2 segments what is localized, but does not understand whether a collision or fight really happened
 
 ### 6.9 Export
@@ -1129,11 +1149,11 @@ Why not those by default:
 - more setup for the same demo goal
 - Gradio is better aligned with Colab and Spaces
 
-### 7.2 OpenCV
+### 7.2 Decord + OpenCV
 
 Used for:
 
-- reading video
+- fast batched video reading through Decord
 - writing clips
 - frame operations
 - preview overlays
@@ -1141,14 +1161,12 @@ Used for:
 Alternatives:
 
 - PyAV
-- decord
 - ffmpeg-python
 
-Why OpenCV stayed:
+Why this split exists:
 
-- simple
-- already integrated
-- practical for clip generation and frame drawing
+- Decord is much faster for sampled and batched frame access during scan
+- OpenCV remains practical for overlays, frame annotation, and clip-writing helpers
 
 ### 7.3 Ultralytics YOLO
 
@@ -1205,7 +1223,7 @@ Why this SigLIP2 variant:
 - higher input resolution for better frame discrimination
 - still API-compatible with the existing embedding path
 
-### 7.5A Florence-2-large
+### 7.5A Qwen2.5-VL-7B-Instruct-AWQ
 
 Used for:
 
@@ -1215,8 +1233,9 @@ Used for:
 
 Why chosen:
 
-- Microsoft vision foundation model with strong prompt-based image understanding
+- strong open vision-language model with prompt-based image understanding
 - useful as a verifier without making full-video indexing too heavy
+- quantized AWQ form reduces inference cost relative to the full checkpoint
 
 Why it is not the primary retriever:
 
@@ -1250,7 +1269,7 @@ Why it fits this repo:
 - frame ids and segment ids need to stay stable across retrieval and export
 - it improves query latency without changing the grounding stage
 
-### 7.7 Florence-2-large Grounding
+### 7.7 Qwen2.5-VL Grounding
 
 Used for:
 
@@ -1262,7 +1281,7 @@ Alternatives:
 - OWL-ViT
 Why it is used:
 
-- one Florence model now covers both shortlist verification and grounding
+- one Qwen verifier now covers both shortlist verification and grounding
 - stable Hugging Face release
 - strong fit for `locate the person`, `locate the white car`, `locate all the instances`
 
@@ -1292,10 +1311,10 @@ Why SAM2:
 
 Current defaults from code:
 
-- tracker: `yolo11m.pt`
+- tracker: `yolo11n.pt`
 - tracker mode: `botsort.yaml`
 - retrieval: `google/siglip2-so400m-patch14-384`
-- verifier + grounder: `microsoft/Florence-2-large` (one model, two tasks)
+- verifier + grounder: `Qwen/Qwen2.5-VL-7B-Instruct-AWQ`
 - vector retriever: `turbovec` `IdMapIndex`
 - segmentation: `facebook/sam2.1-hiera-small`
 
@@ -1325,9 +1344,9 @@ This is the main optimization concept of the project.
 - denser frame sampling for better timestamp precision
 - averaged window embeddings
 - `turbovec` top-k vector retrieval instead of full Python rescoring over every frame or segment
-- Florence-2 verification only on the top candidate during search
+- Qwen2.5-VL verification only on the top candidates during search
 - Query-time frame re-selection inside matched windows for top-4 hits
-- Florence-2 phrase grounding shown at search result time for top-1 hit, with YOLO box fallback for detector-supported classes
+- Qwen2.5-VL phrase grounding shown at search result time for top-1 hit, with YOLO box fallback for detector-supported classes
 - Query-time detector-backed matching uses stored scan-time detections instead of re-running YOLO over every indexed frame
 - Scan-time SigLIP2 frame embeddings are computed in batches instead of one frame at a time
 - Color-object queries for supported vehicles now use a stricter HSV-based dominant-color estimate to reduce false color matches
@@ -1411,9 +1430,9 @@ The project does not segment the full video during scanning.
 
 Even after optimization, the first full run in Colab can still feel slow because:
 
-- YOLO11m must load
+- YOLO11n must load
 - SigLIP2 So400m must load
-- Florence-2-large must load before verification and grounding are available
+- Qwen2.5-VL-AWQ must load before verification and grounding are available
 - scan-time detection and embedding still run over every sampled frame
 
 `turbovec` speeds up vector retrieval after embeddings already exist.
@@ -1452,15 +1471,15 @@ Impact:
 
 - warning only unless runtime actually fails
 
-### 14.4 Florence-2 Load Risk
+### 14.4 Qwen Verifier Load Risk
 
 Meaning:
 
-- `trust_remote_code=True` model loading can still break if upstream behavior changes
+- large multimodal model loading can still break if upstream behavior changes or GPU memory is insufficient
 
 Impact:
 
-- if it fails, both shortlist verification and grounding are affected because the current runtime intentionally uses one Florence grounding framework instead of parallel fallbacks
+- if it fails, both shortlist verification and grounding are affected because the current runtime intentionally uses one Qwen grounding framework instead of parallel fallbacks
 
 ## 14A. Terms and Meanings
 
@@ -1552,23 +1571,19 @@ This is why repeated queries are faster later.
 
 This section records the current model-selection conclusion based on official sources.
 
-### 14B.1 Florence-2-large
+### 14B.1 Qwen2.5-VL-7B-Instruct-AWQ
 
-Officially, Florence-2-large is presented as a prompt-driven vision foundation model that supports:
-
-- captioning
-- phrase grounding
-- object detection
-- dense region captioning
+In this project, Qwen2.5-VL is used as a prompt-driven visual verifier and phrase grounder over shortlisted frames.
 
 Why it helps this project:
 
-- one model family can verify matched frames and ground phrases inside them
+- one model family verifies matched frames and grounds phrases inside them
+- it supports more open-world phrasing than detector-only class matching
 
 Why it does not solve everything:
 
 - it localizes and describes regions in frames
-- it does not by itself recognize temporal events like collisions across time
+- it does not by itself recognize temporal events across time with guaranteed correctness
 
 ### 14B.2 VideoMAE and TimeSformer
 
@@ -1672,7 +1687,7 @@ A: It pays the analysis cost once and allows repeated queries cheaply afterward.
 ### 18.2 Architecture
 
 Q: What are the major stages of the pipeline?  
-A: Video scan, frame sampling, tracking, embedding, frame indexing, query expansion, fast retrieval, candidate clustering, Florence verification, clip prep, grounding, segmentation, export.
+A: Video scan, batched sampling, duplicate filtering, detection, embedding, frame indexing, query expansion, fast retrieval, candidate clustering, Qwen verification, clip prep, grounding, segmentation, export.
 
 Q: Can you explain the architecture in one sentence?  
 A: The system first scans and indexes a video, then uses fast retrieval to narrow the search, then applies more expensive verification and grounding only on the best candidate.
@@ -1694,14 +1709,14 @@ A: Fast object detection and useful live preview overlays.
 Q: Why use SigLIP2?  
 A: It provides text-image retrieval embeddings for semantic search.
 
-Q: Why use Florence-2?  
-A: It acts as a second-stage verifier and description model on top candidates, improving difficult semantic queries without slowing the full scan stage too much.
+Q: Why use Qwen2.5-VL?  
+A: It acts as a second-stage verifier and grounding model on top candidates, improving difficult semantic queries without slowing the full scan stage too much.
 
-Q: Why use Florence-2-large for grounding too?  
-A: It lets the runtime use one active Florence model family for both shortlist verification and matched-frame phrase grounding instead of mixing two grounding frameworks.
+Q: Why use Qwen2.5-VL for grounding too?  
+A: It lets the runtime use one active verifier model family for both shortlist verification and matched-frame phrase grounding instead of mixing two grounding frameworks.
 
 Q: Why use turbovec if the app can still feel slow?  
-A: turbovec speeds up vector retrieval after embeddings exist. It does not remove the cost of YOLO detection, SigLIP2 embedding, Florence verification, or first-run model loading.
+A: turbovec speeds up vector retrieval after embeddings exist. It does not remove the cost of YOLO detection, SigLIP2 embedding, Qwen verification, or first-run model loading.
 
 Q: Why use SAM2?  
 A: To convert grounded boxes into region masks and segmented previews.
@@ -1723,13 +1738,13 @@ A: It can produce incorrect retrievals or weak event matches. No honest open-wor
 ### 18.5 Optimization
 
 Q: What optimizations are used?  
-A: Frame sampling, scan-first indexing, frame-first ANN retrieval with turbovec, selective Florence verification, export-only clip generation, on-demand segmentation, caching, and atomic video writes.
+A: Batched Decord frame reads, duplicate filtering, scan-first indexing, frame-first ANN retrieval with turbovec, selective Qwen verification, export-only clip generation, on-demand segmentation, caching, and atomic video writes.
 
 Q: Why are matched frames shown faster now?  
 A: Because the query flow no longer generates clips just to display search results. It shows frame results first and defers clip generation until export.
 
 Q: Why are some matched frames shown with bounding boxes and others without?  
-A: The top-1 result runs Florence-2 phrase grounding immediately after search and draws boxes if the queried phrase can be grounded. Results 2-4 show boxes only on export. For detector-supported classes, YOLO scan-time boxes serve as a fallback when Florence grounding returns empty.
+A: The top result runs Qwen phrase grounding immediately after search and draws boxes if the queried phrase can be grounded. For detector-supported classes, YOLO scan-time boxes serve as a fallback when Qwen grounding returns empty.
 
 Q: Why are atomic writes used for clips?  
 A: To prevent broken MP4 files from being exposed before writing finishes.
@@ -1771,7 +1786,7 @@ If the project were redesigned, possible substitutions include:
 - grounding:
   - Grounding DINO only
   - OWL-ViT
-  - Florence-2 style grounding
+  - Qwen-style phrase grounding
 - segmentation:
   - FastSAM
   - MobileSAM
@@ -1901,7 +1916,7 @@ In the current repo, this stage is more precisely:
 - frame ANN retrieval with turbovec
 - lightweight object-aware reranking
 - temporal clustering
-- Florence-2 verification
+- Qwen2.5-VL verification
 
 ### Stage 4. Candidate refinement
 
@@ -1977,13 +1992,13 @@ Important truth:
 
 This project is best understood as a layered surveillance search system:
 
-- YOLO11m + BoT-SORT answers: what objects are present and how they persist across sampled frames
+- YOLO11n + BoT-SORT answers: what objects are present and how they persist across sampled frames
 - Appearance tagging answers: whether a supported tracked vehicle crop matches a color-object query
 - SigLIP2 answers: which sampled frames are semantically similar to the query
 - turbovec answers: which indexed frame embeddings to search first
 - Query-time re-selection answers: which exact frame inside the matched window best matches the query
-- Florence-2-large (verification role) answers: which top candidate frames are better described
-- Florence-2-large (grounding role) answers: where the queried thing is in the top-1 matched frame
-- YOLO scan-time boxes answer: where detector-supported objects are when Florence grounding fails
+- Qwen2.5-VL (verification role) answers: which top candidate frames are better described
+- Qwen2.5-VL (grounding role) answers: where the queried thing is in the top matched frame
+- YOLO scan-time boxes answer: where detector-supported objects are when Qwen grounding fails
 - SAM2 answers: what exact pixel region should be highlighted on export
 - Clip and report generation answers: how to deliver the result to the user

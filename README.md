@@ -7,7 +7,7 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 ## How It Works
 
 1. Upload a video and click Scan.
-2. The system samples frames, detects objects, and builds a searchable index.
+2. The system samples frames, prunes near-duplicate/static frames, detects objects, and builds a searchable index.
 3. Enter a natural-language query and click Find Matches.
 4. The top matched frame is shown with a grounding box if the queried phrase can be located.
 5. Export selected clips, CSV, JSON, or HTML reports.
@@ -16,7 +16,7 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 
 | Role | Model |
 |---|---|
-| Detection + Tracking | YOLO11m + BoT-SORT |
+| Detection + Tracking | YOLO11n + BoT-SORT |
 | Retrieval | SigLIP2 So400m/14 384 |
 | Verification + Grounding | Qwen2.5-VL-7B-Instruct |
 | Segmentation | SAM2.1-hiera-small |
@@ -34,15 +34,23 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 - Exact frame re-selection within matched windows
 - Segmented clip and region mask on export
 - Fast shortlist retrieval with turbovec after scan-time indexing is complete
+- Lower default scan density with cheap redundancy pruning before heavy models
+- SigLIP2 frame embedding uses larger CUDA batches and guarded `torch.compile` on the vision tower
+- Long scans accumulate vectors in chunks before the final turbovec build
+- Background warm-up loads the heavy models as the app starts
+- Query verification is cached by stable frame key plus normalized query
+- Confirmed matches stream into the UI as they arrive
+- Qwen2.5-VL uses an AWQ model by default and can use `vllm` automatically when available
 
 ## Known Limitations
 
 - Temporal events (collisions, fights, falls) are not guaranteed to be correctly identified.
   The system verifies shortlisted frames with Qwen2.5-VL, but difficult event understanding is still model-limited.
+- The default scan interval is now coarser than before. This is faster, but ultra-short events have a slightly higher chance of being missed.
 - Queries shorter than 3 words or very abstract queries (unusual activity, suspicious thing)
   will return weaker results.
 - Very long videos increase scan time linearly. This is expected behavior.
-- First-run startup is slower because YOLO11m, SigLIP2, Qwen2.5-VL-7B, and SAM2 checkpoints must load before the full stack becomes responsive.
+- First-run startup is slower because YOLO11n, SigLIP2, Qwen2.5-VL-7B, and SAM2 checkpoints must load before the full stack becomes responsive.
 
 ## Setup
 

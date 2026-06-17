@@ -1,24 +1,54 @@
 import json
 import os
 import re
+import threading
 
 import torch
 from PIL import Image
 
 
 class QwenFrameVerifier:
-    def __init__(self, model="Qwen/Qwen2.5-VL-7B-Instruct", device=None):
+    def __init__(self, model="Qwen/Qwen2.5-VL-7B-Instruct-AWQ", device=None):
         self.model_name = model
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.processor = None
         self.process_vision_info = None
+        self.vllm_engine = None
+        self.vllm_sampling = None
+        self.backend = "none"
         self.failed = False
         self.cache = {}
+        self.lock = threading.Lock()
 
     def load(self):
-        if self.model is not None or self.failed:
+        if self.model is not None or self.vllm_engine is not None or self.failed:
             return
+        if self._load_vllm():
+            return
+        self._load_hf()
+
+    def _load_vllm(self):
+        if self.dev != "cuda":
+            return False
+        try:
+            from vllm import LLM, SamplingParams
+
+            self.vllm_engine = LLM(
+                self.model_name,
+                trust_remote_code=True,
+                dtype="half",
+                limit_mm_per_prompt={"image": 1},
+            )
+            self.vllm_sampling = SamplingParams(temperature=0.0, max_tokens=180)
+            self.backend = "vllm"
+            return True
+        except Exception:
+            self.vllm_engine = None
+            self.vllm_sampling = None
+            return False
+
+    def _load_hf(self):
         try:
             from qwen_vl_utils import process_vision_info
             from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
@@ -35,6 +65,7 @@ class QwenFrameVerifier:
                 self.model.to(self.dev)
             self.model.eval()
             self.process_vision_info = process_vision_info
+            self.backend = "hf"
         except Exception:
             self.failed = True
             self.model = None
@@ -77,6 +108,8 @@ class QwenFrameVerifier:
 
     def _ask(self, frame_path, prompt, max_new_tokens=180):
         self.load()
+        if self.vllm_engine is not None:
+            return self._ask_vllm(frame_path, prompt, max_new_tokens=max_new_tokens)
         if self.model is None or self.processor is None or self.process_vision_info is None:
             return ""
         if not frame_path or not os.path.exists(frame_path):
@@ -108,10 +141,47 @@ class QwenFrameVerifier:
         except Exception:
             return ""
 
-    def verify_query(self, frame_path, query):
-        key = ("verify", frame_path, query.strip().lower())
+    def _ask_vllm(self, frame_path, prompt, max_new_tokens=180):
+        if self.vllm_engine is None or not frame_path or not os.path.exists(frame_path):
+            return ""
+        image = Image.open(frame_path).convert("RGB")
+        sampling = self.vllm_sampling
+        if sampling is None or getattr(sampling, "max_tokens", None) != max_new_tokens:
+            try:
+                from vllm import SamplingParams
+
+                sampling = SamplingParams(temperature=0.0, max_tokens=max_new_tokens)
+            except Exception:
+                sampling = None
+        if sampling is None:
+            return ""
+        req = {
+            "prompt": prompt,
+            "multi_modal_data": {"image": image},
+        }
+        try:
+            outputs = self.vllm_engine.generate([req], sampling)
+            if not outputs:
+                return ""
+            out = outputs[0].outputs
+            if not out:
+                return ""
+            return str(out[0].text).strip()
+        except Exception:
+            return ""
+
+    def warmup(self):
+        self.load()
+        return not self.failed
+
+    def _cache_key(self, frame_path, query, frame_key=None):
+        norm_q = " ".join(query.strip().lower().split())
+        return ("verify", frame_key or frame_path, norm_q)
+
+    def verify_query(self, frame_path, query, frame_key=None):
+        key = self._cache_key(frame_path, query, frame_key=frame_key)
         if key in self.cache:
-            return self.cache[key]
+            return dict(self.cache[key])
         image = Image.open(frame_path).convert("RGB") if frame_path and os.path.exists(frame_path) else None
         if image is None:
             return {"matched": False, "confidence": 0.0, "caption": "", "boxes": []}
@@ -137,9 +207,10 @@ class QwenFrameVerifier:
             "caption": str(data.get("description", "") or "").strip(),
             "boxes": boxes,
         }
-        self.cache[key] = result
+        with self.lock:
+            self.cache[key] = dict(result)
         return result
 
-    def ground_phrase(self, frame_path, phrase, multi=True):
-        result = self.verify_query(frame_path, phrase)
+    def ground_phrase(self, frame_path, phrase, multi=True, frame_key=None):
+        result = self.verify_query(frame_path, phrase, frame_key=frame_key)
         return result.get("boxes", []) if result.get("matched") else []

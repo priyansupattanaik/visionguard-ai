@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -14,13 +15,14 @@ from report_generator import ReportGenerator
 from segmenter import GroundedSegmenter
 from tracker import ObjectTracker
 from vector_index import SegmentVectorIndex
+from video_reader import DecordVideoReader
 from vlm import SearchEncoder
 
 setup_cache()
 
 
 class VisionGuardPipeline:
-    def __init__(self, out_dir="output", yolo="yolo11m.pt", clip_model="google/siglip2-so400m-patch14-384", verifier_model="Qwen/Qwen2.5-VL-7B-Instruct", sam="facebook/sam2.1-hiera-small"):
+    def __init__(self, out_dir="output", yolo="yolo11n.pt", clip_model="google/siglip2-so400m-patch14-384", verifier_model="Qwen/Qwen2.5-VL-7B-Instruct-AWQ", sam="facebook/sam2.1-hiera-small"):
         self.out_dir = out_dir
         self.trk = ObjectTracker(model=yolo)
         self.enc = SearchEncoder(model=clip_model)
@@ -174,6 +176,28 @@ class VisionGuardPipeline:
         edge_ratio = float((edges > 0).mean())
         return mean < 40.0 and std < 28.0 and edge_ratio < 0.025
 
+    def _cheap_signature(self, frame, size=(64, 36)):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        small = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
+        return cv2.GaussianBlur(small, (3, 3), 0)
+
+    def _frame_diff_score(self, sig_a, sig_b):
+        if sig_a is None or sig_b is None:
+            return 1.0
+        diff = cv2.absdiff(sig_a, sig_b)
+        return float(diff.mean() / 255.0)
+
+    def _is_interesting_frame(self, frame, prev_sig, ts, last_keep_ts, min_motion=0.025, force_keep_gap=4.0):
+        sig = self._cheap_signature(frame)
+        if prev_sig is None:
+            return True, sig, 1.0, "first"
+        score = self._frame_diff_score(sig, prev_sig)
+        if score >= min_motion:
+            return True, sig, score, "motion"
+        if last_keep_ts is None or (ts - last_keep_ts) >= force_keep_gap:
+            return True, sig, score, "forced_gap"
+        return False, sig, score, "duplicate"
+
     def _q_objs(self, q):
         q = f" {self._normalize_query(q)} "
         m = {
@@ -282,6 +306,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": score,
                 "base_score": score,
+                "frame_id": row.get("frame_id"),
                 "ts": row["ts"],
                 "representative_frame_path": row["frame_path"],
                 "frame_path": row["frame_path"],
@@ -307,6 +332,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": row["score"],
                 "base_score": row["base_score"],
+                "cache_key": f"frame:{row.get('frame_id', row['ts'])}",
                 "start": start,
                 "end": end,
                 "peak_ts": row["ts"],
@@ -341,7 +367,7 @@ class VisionGuardPipeline:
             row["gallery_frame"] = src
             return row
         try:
-            boxes = self.ver.ground_phrase(src, query)
+            boxes = self.ver.ground_phrase(src, query, frame_key=row.get("cache_key"))
         except Exception:
             boxes = []
         if not boxes:
@@ -422,26 +448,30 @@ class VisionGuardPipeline:
         return max(0.0, ts - pad), min(dur, ts + pad)
 
     def _reselect_best_frame(self, video_path, start_sec, end_sec, query_vec, step_sec=0.1):
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
+        vr = DecordVideoReader(video_path)
+        if len(vr) == 0:
             return None, start_sec, -1.0
+        step_frames = max(1, int(round(step_sec * vr.fps)))
+        start_idx = max(0, int(round(start_sec * vr.fps)))
+        end_idx = min(len(vr) - 1, int(round(end_sec * vr.fps)))
         best_score = -1.0
         best_frame = None
         best_ts = start_sec
-        current = max(0.0, start_sec)
-        while current <= end_sec + 1e-6:
-            cap.set(cv2.CAP_PROP_POS_MSEC, current * 1000.0)
-            ok, frame = cap.read()
-            if ok and frame is not None:
+        indices = list(range(start_idx, end_idx + 1, step_frames))
+        chunk_size = 16
+        for offset in range(0, len(indices), chunk_size):
+            chunk = indices[offset: offset + chunk_size]
+            frames = vr.get_batch(chunk)
+            for idx, frame in zip(chunk, frames):
+                if frame is None:
+                    continue
                 emb = self.vlm.embed_frame(frame)
                 score = float(np.dot(emb, query_vec))
-                ts = float(cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0)
+                ts = vr.ts_for(idx)
                 if score > best_score:
                     best_score = score
                     best_frame = frame.copy()
                     best_ts = ts
-            current += step_sec
-        cap.release()
         if best_frame is None:
             return None, start_sec, -1.0
         safe_start = str(round(start_sec, 2)).replace(".", "_")
@@ -485,7 +515,7 @@ class VisionGuardPipeline:
             return rows
         take = min(top_n, len(rows))
         for i in range(take):
-            result = self.ver.verify_query(rows[i].get("representative_frame_path", rows[i]["frame_path"]), query)
+            result = self.ver.verify_query(rows[i].get("representative_frame_path", rows[i]["frame_path"]), query, frame_key=rows[i].get("cache_key"))
             boxes = result.get("boxes", [])
             caption = result.get("caption", "")
             matched = bool(result.get("matched"))
@@ -510,6 +540,35 @@ class VisionGuardPipeline:
         rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         return rows
 
+    def _verify_rows_stream(self, rows, query, top_n=1):
+        if not rows:
+            return
+        take = min(top_n, len(rows))
+        for i in range(take):
+            result = self.ver.verify_query(rows[i].get("representative_frame_path", rows[i]["frame_path"]), query, frame_key=rows[i].get("cache_key"))
+            boxes = result.get("boxes", [])
+            caption = result.get("caption", "")
+            matched = bool(result.get("matched"))
+            confidence = float(result.get("confidence", 0.0) or 0.0)
+            rows[i]["det_boxes"] = boxes or rows[i].get("det_boxes", [])
+            rows[i]["verified_caption"] = caption
+            rows[i]["grounded"] = bool(boxes)
+            rows[i]["verified_match"] = matched
+            rows[i]["verify_score"] = confidence
+            if matched:
+                rows[i]["score"] = float(rows[i]["score"] + min(0.35, 0.16 + 0.18 * confidence))
+                label = ", ".join(rows[i].get("objects", [])) or query
+                detail = caption or f"visible match for {query}"
+                rows[i]["summary"] = f"verified query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
+            elif caption:
+                rows[i]["score"] = float(rows[i]["score"] * 0.6)
+                rows[i]["low_confidence"] = True
+                rows[i]["summary"] = f"unverified visual candidate at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {caption}"
+            else:
+                rows[i]["score"] = float(rows[i]["score"] * 0.5)
+                rows[i]["low_confidence"] = True
+            yield i, rows[i]
+
     def _confirmed_rows(self, rows):
         return [x for x in rows if x.get("verified_match")]
 
@@ -530,6 +589,7 @@ class VisionGuardPipeline:
                 "query": peak["query"],
                 "score": max(x["score"] for x in chunk),
                 "base_score": peak["base_score"],
+                "cache_key": f"frame:{peak.get('frame_id', peak['ts'])}",
                 "start": start,
                 "end": end,
                 "peak_ts": peak["ts"],
@@ -577,6 +637,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": score,
                 "base_score": score,
+                "frame_id": row.get("frame_id"),
                 "ts": row["ts"],
                 "representative_frame_path": row["frame_path"],
                 "frame_path": row["frame_path"],
@@ -599,6 +660,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": row["score"],
                 "base_score": row["base_score"],
+                "cache_key": f"frame:{row.get('frame_id', row['ts'])}",
                 "start": start,
                 "end": end,
                 "peak_ts": row["ts"],
@@ -618,89 +680,127 @@ class VisionGuardPipeline:
             hit["low_confidence"] = True
         return hits
 
-    def index_video_iter(self, video, sample_sec=0.75, win_sec=4.5):
+    def index_video_iter(self, video, sample_sec=1.25, win_sec=4.5):
         self._new_run(video)
         self.trk.reset()
-        cap = cv2.VideoCapture(video)
-        if not cap.isOpened():
+        vr = DecordVideoReader(video)
+        if len(vr) == 0:
             raise ValueError(f"cannot open video: {video}")
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        fps = vr.fps or 25.0
+        total = len(vr)
         dur = total / fps if fps else 0.0
         step = max(1, int(round(sample_sec * fps)))
         frames = []
         pending = []
         batch_size = 8
+        frame_vec_chunks = []
+        frame_id_chunks = []
+        prev_sig = None
+        last_keep_ts = None
+        last_kept_objects = set()
+        t0 = time.perf_counter()
+        processed_samples = 0
+        total_samples = max(1, len(sample_indices := list(range(0, total, step))))
 
         def flush_pending():
-            nonlocal frames, pending
+            nonlocal frames, pending, frame_vec_chunks, frame_id_chunks
             if not pending:
                 return
             emb_list = self.enc.embed_frames([x["frame"] for x in pending])
+            chunk_vecs = []
+            chunk_ids = []
             for item, emb in zip(pending, emb_list):
+                frame_id = np.uint64(len(frames))
                 frames.append({
-                    "frame_id": np.uint64(len(frames)),
+                    "frame_id": frame_id,
                     "frame": item["frame_idx"],
                     "ts": item["ts"],
                     "emb": emb,
                     "frame_path": item["frame_path"],
                     "meta": item["meta"],
                 })
+                chunk_vecs.append(emb)
+                chunk_ids.append(frame_id)
+            if chunk_vecs:
+                frame_vec_chunks.append(np.ascontiguousarray(np.stack(chunk_vecs).astype(np.float32)))
+                frame_id_chunks.append(np.asarray(chunk_ids, dtype=np.uint64))
             pending = []
 
-        i = 0
-        while True:
-            ok, frame = cap.read()
-            if not ok:
-                break
-            if i % step != 0:
-                i += 1
+        for offset in range(0, len(sample_indices), batch_size):
+            chunk = sample_indices[offset: offset + batch_size]
+            batch_frames = vr.get_batch(chunk)
+            valid = [(i, frame) for i, frame in zip(chunk, batch_frames) if frame is not None]
+            processed_samples += len(chunk)
+            if not valid:
                 continue
-            ts = i / fps
-            detections = self.trk.detect(frame, cls=None, conf=0.18)
-            if self._is_non_content_frame(frame, detections):
-                i += 1
+            interesting = []
+            for i, frame in valid:
+                ts = vr.ts_for(i)
+                keep, sig, motion_score, keep_reason = self._is_interesting_frame(frame, prev_sig, ts, last_keep_ts)
+                prev_sig = sig
+                if keep:
+                    interesting.append((i, frame, ts, motion_score, keep_reason))
+            if not interesting:
                 continue
-            objs = {}
-            det_rows = []
-            for det in detections:
-                name = det["name"]
-                objs[name] = objs.get(name, 0) + 1
-                color = None
-                if name in {"car", "truck", "bus", "motorcycle", "bicycle"}:
-                    color = self._estimate_color(frame, det["box"])
-                det_rows.append({
-                    "box": det["box"],
-                    "conf": det["conf"],
-                    "cls": det["cls"],
-                    "name": name,
-                    "color": color,
+            det_batches = self.trk.detect_batch([frame for _, frame, _, _, _ in interesting], cls=None, conf=0.18)
+            for (i, frame, ts, motion_score, keep_reason), detections in zip(interesting, det_batches):
+                if frame is None:
+                    continue
+                if self._is_non_content_frame(frame, detections):
+                    continue
+                objs = {}
+                det_rows = []
+                for det in detections:
+                    name = det["name"]
+                    objs[name] = objs.get(name, 0) + 1
+                    color = None
+                    if name in {"car", "truck", "bus", "motorcycle", "bicycle"}:
+                        color = self._estimate_color(frame, det["box"])
+                    det_rows.append({
+                        "box": det["box"],
+                        "conf": det["conf"],
+                        "cls": det["cls"],
+                        "name": name,
+                        "color": color,
+                    })
+                meta = {
+                    "objects": objs,
+                    "tracks": [],
+                    "appearances": self._appearance_tags(frame, det_rows),
+                    "detections": det_rows,
+                    "motion_score": round(float(motion_score), 5),
+                    "keep_reason": keep_reason,
+                    "object_delta": len(set(objs.keys()) ^ last_kept_objects),
+                    "still_people": int(objs.get("person", 0) if motion_score < 0.02 else 0),
+                    "person": objs.get("person", 0),
+                }
+                frame_path = os.path.join(self.run_dir, "frames", f"f_{i:06d}.jpg")
+                cv2.imwrite(frame_path, frame)
+                pending.append({
+                    "frame_idx": i,
+                    "ts": ts,
+                    "frame": frame.copy(),
+                    "frame_path": frame_path,
+                    "meta": meta,
                 })
-            meta = {
-                "objects": objs,
-                "tracks": [],
-                "appearances": self._appearance_tags(frame, det_rows),
-                "detections": det_rows,
-                "still_people": 0,
-                "person": objs.get("person", 0),
-            }
-            frame_path = os.path.join(self.run_dir, "frames", f"f_{i:06d}.jpg")
-            cv2.imwrite(frame_path, frame)
-            pending.append({
-                "frame_idx": i,
-                "ts": ts,
-                "frame": frame.copy(),
-                "frame_path": frame_path,
-                "meta": meta,
-            })
-            yield {"kind": "preview", "image": self._preview(frame, det_rows, ts), "status": f"scanning {ts:.1f}s / {dur:.1f}s"}
-            if len(pending) >= batch_size:
-                flush_pending()
-            i += 1
-        cap.release()
+                last_kept_objects = set(objs.keys())
+                last_keep_ts = ts
+                elapsed = max(1e-6, time.perf_counter() - t0)
+                sample_rate = processed_samples / elapsed
+                remain = max(0, total_samples - processed_samples)
+                eta = remain / sample_rate if sample_rate > 0 else 0.0
+                pct = min(100.0, 100.0 * processed_samples / total_samples)
+                status = f"scanning {ts:.1f}s / {dur:.1f}s | {pct:.0f}% | eta {eta:.1f}s"
+                yield {"kind": "preview", "image": self._preview(frame, det_rows, ts), "status": status}
+                if len(pending) >= self.enc.image_batch_size:
+                    flush_pending()
         flush_pending()
         block = max(1, int(round(win_sec / sample_sec)))
         segs = []
+        seg_vec_chunks = []
+        seg_id_chunks = []
+        seg_chunk_vecs = []
+        seg_chunk_ids = []
         for j, item in enumerate(frames):
             lo = (j // block) * block
             hi = min(len(frames), lo + block)
@@ -709,10 +809,19 @@ class VisionGuardPipeline:
             emb = emb / max(np.linalg.norm(emb), 1e-6)
             objs = {}
             tids = set()
+            motion_scores = []
+            still_people = 0
+            forced_keeps = 0
+            object_delta = 0
             for x in chunk:
                 tids |= set(x["meta"]["tracks"])
                 for k, v in x["meta"]["objects"].items():
                     objs[k] = max(objs.get(k, 0), v)
+                motion_scores.append(float(x["meta"].get("motion_score", 0.0)))
+                still_people += int(x["meta"].get("still_people", 0))
+                object_delta += int(x["meta"].get("object_delta", 0))
+                if x["meta"].get("keep_reason") == "forced_gap":
+                    forced_keeps += 1
             segs.append({
                 "seg_id": np.uint64(len(segs)),
                 "start": chunk[0]["ts"],
@@ -722,8 +831,25 @@ class VisionGuardPipeline:
                 "frame_path": item["frame_path"],
                 "objects": sorted(objs.keys()),
                 "tracks": sorted(tids),
+                "temporal_stats": {
+                    "avg_motion": round(float(np.mean(motion_scores)) if motion_scores else 0.0, 5),
+                    "max_motion": round(float(np.max(motion_scores)) if motion_scores else 0.0, 5),
+                    "still_people_frames": still_people,
+                    "forced_keep_frames": forced_keeps,
+                    "object_delta_sum": object_delta,
+                },
                 "tags": [],
             })
+            seg_chunk_vecs.append(emb)
+            seg_chunk_ids.append(np.uint64(len(segs) - 1))
+            if len(seg_chunk_vecs) >= index_chunk_size:
+                seg_vec_chunks.append(np.ascontiguousarray(np.stack(seg_chunk_vecs).astype(np.float32)))
+                seg_id_chunks.append(np.asarray(seg_chunk_ids, dtype=np.uint64))
+                seg_chunk_vecs = []
+                seg_chunk_ids = []
+        if seg_chunk_vecs:
+            seg_vec_chunks.append(np.ascontiguousarray(np.stack(seg_chunk_vecs).astype(np.float32)))
+            seg_id_chunks.append(np.asarray(seg_chunk_ids, dtype=np.uint64))
         meta = {
             "video": video,
             "fps": fps,
@@ -747,17 +873,19 @@ class VisionGuardPipeline:
                     "appearances": x["meta"]["appearances"],
                     "tracks": x["meta"]["tracks"],
                     "detections": x["meta"]["detections"],
+                    "motion_score": x["meta"].get("motion_score", 0.0),
+                    "keep_reason": x["meta"].get("keep_reason", ""),
+                    "still_people": x["meta"].get("still_people", 0),
+                    "object_delta": x["meta"].get("object_delta", 0),
                 }
                 for x in frames
             ],
             "segments": segs,
         }
-        frame_vecs = np.ascontiguousarray(np.stack([x["emb"] for x in frames]).astype(np.float32)) if frames else np.zeros((0, 0), dtype=np.float32)
-        frame_ids = np.asarray([x["frame_id"] for x in frames], dtype=np.uint64) if frames else np.zeros((0,), dtype=np.uint64)
-        self.frame_idx.build(frame_vecs, frame_ids, path=os.path.join(self.run_dir, "reports", "frame_index.tvim"))
-        seg_vecs = np.ascontiguousarray(np.stack([x["emb"] for x in segs]).astype(np.float32)) if segs else np.zeros((0, 0), dtype=np.float32)
-        seg_ids = np.asarray([x["seg_id"] for x in segs], dtype=np.uint64) if segs else np.zeros((0,), dtype=np.uint64)
-        self.search_idx.build(seg_vecs, seg_ids, path=os.path.join(self.run_dir, "reports", "segment_index.tvim"))
+        frame_chunks = list(zip(frame_vec_chunks, frame_id_chunks))
+        seg_chunks = list(zip(seg_vec_chunks, seg_id_chunks))
+        self.frame_idx.build_merged(frame_chunks, path=os.path.join(self.run_dir, "reports", "frame_index.tvim"))
+        self.search_idx.build_merged(seg_chunks, path=os.path.join(self.run_dir, "reports", "segment_index.tvim"))
         path = os.path.join(self.run_dir, "reports", "index.json")
         self.rep.write_json(
             path,
@@ -772,11 +900,15 @@ class VisionGuardPipeline:
                     {
                         "frame_id": x["frame_id"],
                         "ts": x["ts"],
-                        "frame_path": x["frame_path"],
-                        "objects": x["objects"],
-                        "appearances": x["appearances"],
-                        "detections": x["detections"],
-                    }
+                    "frame_path": x["frame_path"],
+                    "objects": x["objects"],
+                    "appearances": x["appearances"],
+                    "detections": x["detections"],
+                    "motion_score": x["meta"].get("motion_score", 0.0),
+                    "keep_reason": x["meta"].get("keep_reason", ""),
+                    "still_people": x["meta"].get("still_people", 0),
+                    "object_delta": x["meta"].get("object_delta", 0),
+                }
                     for x in self.idx["frames"]
                 ],
                 "segments": [
@@ -787,6 +919,7 @@ class VisionGuardPipeline:
                         "mid": x["mid"],
                         "frame_path": x["frame_path"],
                         "objects": x["objects"],
+                        "temporal_stats": x["temporal_stats"],
                         "tags": x["tags"],
                     }
                     for x in segs
@@ -804,8 +937,21 @@ class VisionGuardPipeline:
             "index_json": path,
         }
 
-    def search(self, q, top_k=4):
-        raw_q = q.strip()
+    def warmup_models(self):
+        try:
+            self.trk.load()
+        except Exception:
+            pass
+        try:
+            self.enc.load()
+        except Exception:
+            pass
+        try:
+            self.ver.warmup()
+        except Exception:
+            pass
+
+    def _candidate_hits(self, raw_q, top_k=4):
         q = self._normalize_query(raw_q)
         qv = self._embed_query(raw_q)
         ql = q
@@ -814,8 +960,7 @@ class VisionGuardPipeline:
         detector_hits = self._refine_detector_hits(q, top_k)
         if detector_hits:
             hits = self._apply_reselection(detector_hits, q, qv, top_n=1)
-            checked = self._verify_rows(hits, q, top_n=min(2, len(hits)))
-            return self._confirmed_rows(checked)[:top_k]
+            return q, qv, qobjs, hits, min(2, len(hits))
         frames = self.idx.get("frames", [])
         frame_map = {int(x["frame_id"]): x for x in frames}
         fetch_k = min(max(top_k * 12, 36), len(frames))
@@ -852,6 +997,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": score,
                 "base_score": float(base_score),
+                "frame_id": row["frame_id"],
                 "ts": row["ts"],
                 "representative_frame_path": row["frame_path"],
                 "frame_path": row["frame_path"],
@@ -865,14 +1011,12 @@ class VisionGuardPipeline:
         out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
         if out:
             out = self._apply_reselection(out, q, qv, top_n=min(2, len(out)))
-            verify_n = min(4, len(out)) if not qobjs else min(2, len(out))
-            checked = self._verify_rows(out, q, top_n=verify_n)
-            return self._confirmed_rows(checked)[:top_k]
+            verify_n = min(8, len(out)) if not qobjs else min(4, len(out))
+            return q, qv, qobjs, out, verify_n
         obj_hits = self._fallback_object_hits(q, top_k)
         if obj_hits:
             obj_hits = self._apply_reselection(obj_hits, q, qv, top_n=min(2, len(obj_hits)))
-            checked = self._verify_rows(obj_hits, q, top_n=min(2, len(obj_hits)))
-            return self._confirmed_rows(checked)[:top_k]
+            return q, qv, qobjs, obj_hits, min(4, len(obj_hits))
         if ranked_rows:
             weak = self._cluster_frame_hits(ranked_rows[: max(top_k * 3, 8)], top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
             for hit in weak:
@@ -880,12 +1024,11 @@ class VisionGuardPipeline:
                 hit["low_confidence"] = True
             if weak:
                 weak = self._apply_reselection(weak, q, qv, top_n=min(2, len(weak)))
-                verify_n = min(4, len(weak)) if not qobjs else 1
-                checked = self._verify_rows(weak, q, top_n=verify_n)
-                return self._confirmed_rows(checked)[:top_k]
+                verify_n = min(8, len(weak)) if not qobjs else 1
+                return q, qv, qobjs, weak, verify_n
         n = len(self.idx["segments"])
         if n == 0:
-            return []
+            return q, qv, qobjs, [], 0
         seg_map = {int(x["seg_id"]): x for x in self.idx["segments"]}
         fetch_k = min(max(top_k * 8, 24), n)
         base_scores, seg_ids = self.search_idx.search(qv, fetch_k)
@@ -910,6 +1053,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": score,
                 "base_score": float(base_score),
+                "cache_key": f"seg:{int(seg['seg_id'])}",
                 "start": seg["start"],
                 "end": seg["end"],
                 "peak_ts": seg["mid"],
@@ -931,9 +1075,35 @@ class VisionGuardPipeline:
             if row["score"] < 0.18:
                 continue
             out.append(row)
-        out = self._apply_reselection(out, q, qv, top_n=min(2, len(out)))
-        verify_n = min(4, len(out)) if not qobjs else min(2, len(out))
-        checked = self._verify_rows(out, q, top_n=verify_n)
+        if out:
+            out = self._apply_reselection(out, q, qv, top_n=min(2, len(out)))
+            verify_n = min(8, len(out)) if not qobjs else min(4, len(out))
+            return q, qv, qobjs, out, verify_n
+        return q, qv, qobjs, [], 0
+
+    def search_stream(self, raw_q, top_k=4):
+        q, _, _, candidates, verify_n = self._candidate_hits(raw_q, top_k=top_k)
+        if not candidates:
+            yield []
+            return
+        working = [dict(x) for x in candidates]
+        confirmed = []
+        emitted = set()
+        for idx, row in self._verify_rows_stream(working, q, top_n=verify_n):
+            if row.get("verified_match"):
+                confirmed = sorted(self._confirmed_rows(working), key=lambda x: x["score"], reverse=True)[:top_k]
+                key = tuple(x.get("cache_key") for x in confirmed)
+                if key not in emitted:
+                    emitted.add(key)
+                    yield confirmed
+        if not emitted:
+            yield []
+
+    def search(self, q, top_k=4):
+        checked_q, _, _, candidates, verify_n = self._candidate_hits(q.strip(), top_k=top_k)
+        if not candidates:
+            return []
+        checked = self._verify_rows(candidates, checked_q, top_n=verify_n)
         return self._confirmed_rows(checked)[:top_k]
 
     def prepare_hits(self, hits, query):

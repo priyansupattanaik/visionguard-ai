@@ -9,8 +9,10 @@ class SearchEncoder:
     def __init__(self, model="google/siglip2-so400m-patch14-384", device=None):
         self.model_name = model
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.image_batch_size = 24 if self.dev == "cuda" else 8
         self.p = None
         self.m = None
+        self.compiled = False
 
     def load(self):
         if self.m is not None:
@@ -18,10 +20,23 @@ class SearchEncoder:
         from transformers import AutoModel, AutoProcessor
 
         self.p = AutoProcessor.from_pretrained(self.model_name)
-        self.m = AutoModel.from_pretrained(self.model_name, device_map="auto" if self.dev == "cuda" else None)
-        if self.dev != "cuda":
-            self.m.to(self.dev)
+        dtype = torch.float16 if self.dev == "cuda" else torch.float32
+        self.m = AutoModel.from_pretrained(self.model_name, torch_dtype=dtype, device_map=None)
+        self.m.to(self.dev)
         self.m.eval()
+        self._maybe_compile()
+
+    def _maybe_compile(self):
+        if self.compiled or self.dev != "cuda" or not hasattr(torch, "compile"):
+            return
+        target = getattr(self.m, "vision_model", None)
+        if target is None:
+            return
+        try:
+            self.m.vision_model = torch.compile(target, mode="reduce-overhead", fullgraph=False)
+            self.compiled = True
+        except Exception:
+            self.compiled = False
 
     def _vec(self, x):
         if hasattr(x, "pooler_output"):
@@ -59,15 +74,17 @@ class SearchEncoder:
         self.load()
         if not frames:
             return []
-        imgs = [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in frames]
-        inp = self.p(images=imgs, return_tensors="pt").to(self.dev)
-        with torch.no_grad():
-            vecs = self._vec(self.m.get_image_features(**inp)).detach().cpu().numpy()
         out = []
-        for vec in vecs:
-            n = np.linalg.norm(vec)
-            if n == 0:
-                out.append(vec.astype(np.float32))
-            else:
-                out.append((vec / n).astype(np.float32))
+        for offset in range(0, len(frames), self.image_batch_size):
+            batch = frames[offset: offset + self.image_batch_size]
+            imgs = [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in batch]
+            inp = self.p(images=imgs, return_tensors="pt").to(self.dev)
+            with torch.no_grad():
+                vecs = self._vec(self.m.get_image_features(**inp)).detach().cpu().numpy()
+            for vec in vecs:
+                n = np.linalg.norm(vec)
+                if n == 0:
+                    out.append(vec.astype(np.float32))
+                else:
+                    out.append((vec / n).astype(np.float32))
         return out
