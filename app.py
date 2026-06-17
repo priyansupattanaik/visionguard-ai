@@ -54,6 +54,24 @@ def _sample_videos():
     return sorted(p.name for p in assets.glob("*.mp4"))
 
 
+def _in_colab():
+    try:
+        import google.colab  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _runtime_host():
+    override = os.getenv("VISION_GUARD_HOST", "").strip()
+    if override:
+        return override
+    if _in_colab() or os.getenv("KAGGLE_KERNEL_RUN_TYPE"):
+        return "0.0.0.0"
+    return "127.0.0.1"
+
+
 def _encode_preview(image):
     ok, buf = cv2.imencode(".jpg", cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
     if not ok:
@@ -429,5 +447,9 @@ def artifact(path: str):
 
 
 if __name__ == "__main__":
-    host = "0.0.0.0" if (os.getenv("COLAB_RELEASE_TAG") or os.getenv("COLAB_GPU") or os.getenv("KAGGLE_KERNEL_RUN_TYPE")) else "127.0.0.1"
+    host = _runtime_host()
+    if host == "127.0.0.1":
+        print("Open Vision Guard at http://127.0.0.1:7860")
+    else:
+        print("Open Vision Guard through your notebook or remote host on port 7860")
     uvicorn.run(app, host=host, port=7860, log_level="info")
