@@ -162,6 +162,10 @@ def export_selected(picks, q, hits):
     return gr.update(visible=True, value=zipf), gr.update(visible=True, value=html), gr.update(visible=True, value=csv)
 
 
+def get_system_status():
+    return pipe.warmup_status()
+
+
 with gr.Blocks(title="Vision Guard", css=css, theme=theme) as demo:
     gr.HTML(
         """
@@ -205,6 +209,8 @@ with gr.Blocks(title="Vision Guard", css=css, theme=theme) as demo:
     scan_btn.click(lambda: "", None, searched)
     find_btn.click(find_query, [query], [status, answer, searched, table, pick, gallery, match_md, q_state, hits_state, zipf, html, csv])
     export_btn.click(export_selected, [pick, q_state, hits_state], [zipf, html, csv])
+
+demo.load(fn=get_system_status, inputs=None, outputs=status)
 
 
 if __name__ == "__main__":

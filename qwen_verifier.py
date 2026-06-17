@@ -2,12 +2,23 @@ import json
 import os
 import re
 import threading
+import platform
 
 import torch
 from PIL import Image
 
+_DEV_MODE = platform.system() == "Windows" and not torch.cuda.is_available()
+
 
 class QwenFrameVerifier:
+    _ABSTRACT_TERMS = frozenset({
+        "fight","fighting","assault","brawl",
+        "fall","falling","collapse",
+        "collision","collide","crash","accident",
+        "crowd","crowded","gathering",
+        "loitering","loiter","suspicious","violence"
+    })
+
     def __init__(self, model="Qwen/Qwen2.5-VL-7B-Instruct-AWQ", device=None):
         self.model_name = model
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -21,7 +32,15 @@ class QwenFrameVerifier:
         self.cache = {}
         self.lock = threading.Lock()
 
+    def _confidence_threshold(self, query: str) -> float:
+        if any(t in query.lower() for t in self._ABSTRACT_TERMS):
+            return 0.30
+        return 0.45
+
     def load(self):
+        if _DEV_MODE:
+            self.backend = "dev_passthrough"
+            return
         if self.model is not None or self.vllm_engine is not None or self.failed:
             return
         if self._load_vllm():
@@ -179,6 +198,13 @@ class QwenFrameVerifier:
         return ("verify", frame_key or frame_path, norm_q)
 
     def verify_query(self, frame_path, query, frame_key=None):
+        if self.backend == "dev_passthrough":
+            return {
+                "matched": True,
+                "confidence": 0.55,
+                "caption": "[dev mode — Qwen skipped on Windows CPU]",
+                "boxes": []
+            }
         key = self._cache_key(frame_path, query, frame_key=frame_key)
         if key in self.cache:
             return dict(self.cache[key])
@@ -199,7 +225,7 @@ class QwenFrameVerifier:
         boxes = self._clean_boxes(data.get("boxes", []), image.size)
         matched = bool(data.get("matched", False))
         confidence = float(data.get("confidence", 0.0) or 0.0)
-        if confidence < 0.45:
+        if confidence < self._confidence_threshold(query):
             matched = False
         result = {
             "matched": matched,

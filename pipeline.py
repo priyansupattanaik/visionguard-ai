@@ -40,6 +40,8 @@ class VisionGuardPipeline:
         self.raw_jobs = {}
         self.seg_jobs = {}
         os.makedirs(out_dir, exist_ok=True)
+        self._warmup_failures = {}
+        self._warmup_done = False
 
     def _color_words(self):
         return {
@@ -680,7 +682,7 @@ class VisionGuardPipeline:
             hit["low_confidence"] = True
         return hits
 
-    def index_video_iter(self, video, sample_sec=1.25, win_sec=4.5):
+    def index_video_iter(self, video, sample_sec=0.75, win_sec=4.5):
         self._new_run(video)
         self.trk.reset()
         vr = DecordVideoReader(video)
@@ -933,18 +935,24 @@ class VisionGuardPipeline:
         }
 
     def warmup_models(self):
-        try:
-            self.trk.load()
-        except Exception:
-            pass
-        try:
-            self.enc.load()
-        except Exception:
-            pass
-        try:
-            self.ver.warmup()
-        except Exception:
-            pass
+        self._warmup_failures = {}
+        for name, fn in [("tracker", self.trk.load),
+                         ("encoder", self.enc.load),
+                         ("verifier", self.ver.warmup)]:
+            try:
+                fn()
+            except Exception as e:
+                self._warmup_failures[name] = str(e)
+        self._warmup_done = True
+
+    def warmup_status(self) -> str:
+        if not self._warmup_done:
+            return "Models loading..."
+        if not self._warmup_failures:
+            return "All models ready."
+        return "WARNING: " + " | ".join(
+            f"{k} failed: {v}" for k, v in self._warmup_failures.items()
+        )
 
     def _candidate_hits(self, raw_q, top_k=4):
         q = self._normalize_query(raw_q)
