@@ -62,14 +62,19 @@ python app.py
 Open:
 
 - local Windows/Linux/macOS: [http://127.0.0.1:7860](http://127.0.0.1:7860)
-- Colab: use the proxied URL printed by the notebook cell after `App Ready`
+- Colab: use the notebook port window opened by `output.serve_kernel_port_as_window(7860)`
 
 ## Running on Colab
 
 ```python
-from google.colab import drive
+from google.colab import drive, output, userdata
 drive.mount('/content/drive')
+
 import os
+import subprocess
+import time
+import urllib.request
+
 base = "/content/drive/MyDrive/visionguard_cache"
 paths = {
     "HF_HOME": f"{base}/hf",
@@ -83,17 +88,29 @@ for key, value in paths.items():
     os.environ[key] = value
 for key in ["HF_HOME", "TRANSFORMERS_CACHE", "HUGGINGFACE_HUB_CACHE", "TORCH_HOME", "YOLO_CONFIG_DIR"]:
     os.makedirs(os.environ[key], exist_ok=True)
+
+hf_token = userdata.get("HF_TOKEN")
+if hf_token:
+    os.environ["HF_TOKEN"] = hf_token
+
 if not os.path.exists("/content/visionguard-ai"):
     !git clone https://github.com/priyansupattanaik/visionguard-ai.git /content/visionguard-ai
 %cd /content/visionguard-ai
 !git pull
 !pip install -r requirements.txt
-import subprocess, time, urllib.request
-from google.colab.output import eval_js
+
 os.environ["VISION_GUARD_HOST"] = "0.0.0.0"
 os.environ["GRADIO_SHARE"] = "0"
-proc = subprocess.Popen(["python", "app.py"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+proc = subprocess.Popen(
+    ["python", "app.py"],
+    stdout=subprocess.PIPE,
+    stderr=subprocess.STDOUT,
+    text=True,
+    bufsize=1,
+)
+
 deadline = time.time() + 300
+ready = False
 while time.time() < deadline:
     line = proc.stdout.readline()
     if line:
@@ -101,15 +118,22 @@ while time.time() < deadline:
     try:
         with urllib.request.urlopen("http://127.0.0.1:7860/", timeout=3) as r:
             if r.status == 200:
+                ready = True
                 break
     except Exception:
         time.sleep(1)
+
+if not ready:
+    raise RuntimeError("Vision Guard did not become reachable on port 7860.")
+
 print("App Ready")
-print(eval_js("google.colab.kernel.proxyPort(7860)"))
+output.serve_kernel_port_as_window(7860)
 ```
 
 Use a GPU runtime in Colab for the current default stack.
 The first run downloads the models once. If Drive is mounted, the project cache helper keeps Hugging Face and Torch caches in Drive so later Colab sessions reuse them.
+
+If the old `proxyPort(...)` URL shows a 404 page, use `output.serve_kernel_port_as_window(7860)` instead. That is the correct Colab launch method for this notebook flow.
 
 To remove unauthenticated Hugging Face Hub warnings and get better rate limits, set a valid `HF_TOKEN` before launch.
 
