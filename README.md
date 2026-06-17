@@ -1,15 +1,15 @@
 # Vision Guard
 
-A scan-first CCTV video search system.
+A scan-first CCTV video search system with a FastAPI + HTML interface.
 Scan a video once. Search it many times using natural-language queries.
 Returns matched frames with timestamps, bounding boxes on top results, and exportable clips.
 
 ## How It Works
 
-1. Upload a video and click Scan.
+1. Upload a video or scan a sample clip.
 2. The system samples frames, prunes near-duplicate/static frames, detects objects, and builds a searchable index.
 3. Enter a natural-language query and click Find Matches.
-4. The top matched frame is shown with a grounding box if the queried phrase can be located.
+4. The top matched frames are shown in the HTML UI with timestamps and export selectors.
 5. Export selected clips, CSV, JSON, or HTML reports.
 
 ## Model Stack
@@ -18,7 +18,7 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 |---|---|
 | Detection + Tracking | YOLO11n + BoT-SORT |
 | Retrieval | SigLIP2 So400m/14 384 |
-| Verification + Grounding | Qwen2.5-VL-7B-Instruct |
+| Verification + Grounding | Qwen2.5-VL-7B-Instruct-AWQ |
 | Segmentation | SAM2.1-hiera-small |
 | Vector Index | turbovec IdMapIndex |
 
@@ -59,6 +59,11 @@ pip install -r requirements.txt
 python app.py
 ```
 
+Open:
+
+- local Windows/Linux/macOS: [http://127.0.0.1:7860](http://127.0.0.1:7860)
+- Colab: use the proxied URL printed by the notebook cell
+
 ## Running on Colab
 
 ```python
@@ -83,7 +88,19 @@ if not os.path.exists("/content/visionguard-ai"):
 %cd /content/visionguard-ai
 !git pull
 !pip install -r requirements.txt
-!python app.py
+from google.colab.output import eval_js
+import subprocess, time
+proc = subprocess.Popen(["python", "app.py"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+deadline = time.time() + 120
+while time.time() < deadline:
+    line = proc.stdout.readline()
+    if not line:
+        time.sleep(1)
+        continue
+    print(line, end="")
+    if "Uvicorn running on" in line or "Application startup complete" in line:
+        break
+print(eval_js("google.colab.kernel.proxyPort(7860)"))
 ```
 
 Use a GPU runtime in Colab for the current default stack.
