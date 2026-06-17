@@ -1,6 +1,6 @@
 # Vision Guard
 
-A scan-first CCTV video search system with a FastAPI + HTML interface.
+A scan-first CCTV video search system with a Gradio interface.
 Scan a video once. Search it many times using natural-language queries.
 Returns matched frames with timestamps, bounding boxes on top results, and exportable clips.
 
@@ -9,7 +9,7 @@ Returns matched frames with timestamps, bounding boxes on top results, and expor
 1. Upload a video or scan a sample clip.
 2. The system samples frames, prunes near-duplicate/static frames, detects objects, and builds a searchable index.
 3. Enter a natural-language query and click Find Matches.
-4. The top matched frames are shown in the HTML UI with timestamps and export selectors.
+4. The top matched frames are shown in the Gradio UI with timestamps and export selectors.
 5. Export selected clips, CSV, JSON, or HTML reports.
 
 ## Model Stack
@@ -62,7 +62,7 @@ python app.py
 Open:
 
 - local Windows/Linux/macOS: [http://127.0.0.1:7860](http://127.0.0.1:7860)
-- Colab: use the proxied URL printed by the notebook cell
+- Colab: use the proxied URL printed by the notebook cell after `App Ready`
 
 ## Running on Colab
 
@@ -88,18 +88,23 @@ if not os.path.exists("/content/visionguard-ai"):
 %cd /content/visionguard-ai
 !git pull
 !pip install -r requirements.txt
+import subprocess, time, urllib.request
 from google.colab.output import eval_js
-import subprocess, time
-proc = subprocess.Popen(["python", "app.py"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-deadline = time.time() + 120
+os.environ["VISION_GUARD_HOST"] = "0.0.0.0"
+os.environ["GRADIO_SHARE"] = "0"
+proc = subprocess.Popen(["python", "app.py"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+deadline = time.time() + 300
 while time.time() < deadline:
     line = proc.stdout.readline()
-    if not line:
+    if line:
+        print(line, end="")
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:7860/", timeout=3) as r:
+            if r.status == 200:
+                break
+    except Exception:
         time.sleep(1)
-        continue
-    print(line, end="")
-    if "Uvicorn running on" in line or "Application startup complete" in line:
-        break
+print("App Ready")
 print(eval_js("google.colab.kernel.proxyPort(7860)"))
 ```
 
