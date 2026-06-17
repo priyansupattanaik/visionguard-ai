@@ -110,3 +110,18 @@ print(eval_js("google.colab.kernel.proxyPort(7860)"))
 
 Use a GPU runtime in Colab for the current default stack.
 The first run downloads the models once. If Drive is mounted, the project cache helper keeps Hugging Face and Torch caches in Drive so later Colab sessions reuse them.
+
+To remove unauthenticated Hugging Face Hub warnings and get better rate limits, set a valid `HF_TOKEN` before launch.
+
+Example in Colab:
+
+```python
+from google.colab import userdata
+os.environ["HF_TOKEN"] = userdata.get("HF_TOKEN")
+```
+
+Or set it manually:
+
+```python
+os.environ["HF_TOKEN"] = "hf_your_token_here"
+```
