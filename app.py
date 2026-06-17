@@ -32,6 +32,26 @@ css = """
 """
 
 
+def _in_colab():
+    if os.getenv("COLAB_RELEASE_TAG") or os.getenv("COLAB_GPU"):
+        return True
+    try:
+        import google.colab  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _share_enabled():
+    raw = os.getenv("GRADIO_SHARE", "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return _in_colab() or bool(os.getenv("KAGGLE_KERNEL_RUN_TYPE"))
+
+
 def _meta(meta):
     return (
         f"video: `{os.path.basename(meta['video'])}`\n\n"
@@ -177,6 +197,6 @@ with gr.Blocks(title="Vision Guard", css=css, theme=theme) as demo:
 
 
 if __name__ == "__main__":
-    share = bool(os.getenv("COLAB_RELEASE_TAG") or os.getenv("KAGGLE_KERNEL_RUN_TYPE"))
+    share = _share_enabled()
     server_name = "0.0.0.0" if share else "127.0.0.1"
     demo.launch(server_name=server_name, share=share, show_error=True)

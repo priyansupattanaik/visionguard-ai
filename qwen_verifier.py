@@ -57,7 +57,7 @@ class QwenFrameVerifier:
             self.processor = AutoProcessor.from_pretrained(self.model_name, trust_remote_code=True)
             self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.model_name,
-                torch_dtype=dtype,
+                dtype=dtype,
                 device_map="auto" if self.dev == "cuda" else None,
                 trust_remote_code=True,
             )
