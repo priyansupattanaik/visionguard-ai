@@ -473,8 +473,9 @@ Methods:
   - places model on target device
   - calls `_maybe_compile()`
 - `_maybe_compile()`
-  - only attempts `torch.compile` on CUDA
-  - compiles `self.m.vision_model` when present
+  - intentionally does not compile the SigLIP vision tower
+  - leaves `self.compiled = False`
+  - code comment explains that `torch.compile` with CUDA graphs is incompatible with Gradio worker-thread execution and caused TLS assertion failures during scan
 - `_vec(x)`
   - extracts `pooler_output`, `image_embeds`, or `text_embeds`
 - `_norm(x)`
@@ -737,6 +738,7 @@ Methods:
 Key behavior:
 
 - dense reselection probes frames every `0.1s` inside a candidate clip window
+- current call sites in `_candidate_hits()` invoke reselection with `top_n=min(4, len(hits))` for detector hits, frame ANN hits, object fallback hits, weak semantic hits, and segment hits
 - verification can:
   - promote scores for confirmed matches
   - demote low-confidence/unverified rows
@@ -856,6 +858,7 @@ Important behavior:
 - event-style queries return no matches
 - unsupported simple exact-object labels return no exact matches instead of semantic substitutions
 - strong detector and object-fallback hits can still be surfaced for supported object queries even when verifier confirmation is absent
+- before verification, both `search_stream()` and `search()` wait up to 30 seconds for the verifier backend to leave `None` / `"none"` so a search does not run before Qwen finishes warmup
 
 #### Clip generation and segmentation jobs
 
@@ -902,24 +905,30 @@ Role: Colab execution path from GitHub.
 
 Notebook flow:
 
-1. clone repo into `visionguard-ai`
-2. `%cd visionguard-ai`
-3. `git pull`
-4. mount Drive
-5. optionally load `HF_TOKEN` from Colab secrets
-6. set persistent cache environment variables under `/content/drive/MyDrive/visionguard_cache`
-7. upgrade `pip`
-8. install `requirements.txt`
-9. optionally check GPU
-10. set:
+1. set `REPO_URL = "https://github.com/priyansupattanaik/visionguard-ai.git"`
+2. set `REPO_DIR = "/content/visionguard-ai"`
+3. `%cd /content`
+4. clone only when `REPO_DIR` does not already exist
+5. `%cd {REPO_DIR}`
+6. run `git pull`
+7. print `Working directory: /content/visionguard-ai`
+8. mount Drive
+9. optionally load `HF_TOKEN` from Colab secrets
+10. set persistent cache environment variables under `/content/drive/MyDrive/visionguard_cache`
+11. upgrade `pip`
+12. install `requirements.txt`
+13. optionally check GPU
+14. set:
     - `VISION_GUARD_HOST=0.0.0.0`
     - `GRADIO_SHARE=1`
-11. run `python -u app.py`
-12. use the printed `gradio.live` URL
+15. run `python -u app.py`
+16. use the printed `gradio.live` URL
 
 Evidence-based conclusion:
 
 - The notebook is designed around `gradio.live`, not iframe serving or FastAPI.
+- The clone cell was hardened to avoid path nesting on repeated notebook re-runs by resetting to `/content` and cloning only once.
+- The notebook markdown still includes event-style example queries in its usage text, but the runtime pipeline rejects event queries before retrieval; the executable behavior is defined by `pipeline.py`, not by that markdown example list.
 
 ### 6.14 `optional_integrations/headroom/README.md`
 
@@ -1301,7 +1310,7 @@ The practical design split is:
 
 16. Under what conditions does Qwen run through vLLM versus Transformers?
 17. What is the practical effect of `dev_passthrough` on Windows CPU?
-18. Why is `torch.compile` used only on the SigLIP vision tower and only on CUDA?
+18. Why is `torch.compile` intentionally disabled in `vlm.py` even though GPU execution is used for SigLIP2?
 19. What does the code gain from AWQ quantization if the model path itself is already a quantized checkpoint?
 20. What are the implications of using `device_map="auto"` in the verifier and segmenter loaders?
 
@@ -1316,7 +1325,7 @@ The practical design split is:
 ### Reliability and correctness
 
 26. What does `warmup_status()` protect against compared with the previous silent warmup path?
-27. Why is `search_stream()` behavior important to understand when debugging "no results" issues?
+27. Why is `search_stream()` behavior important to understand when debugging "no results" issues, especially when the verifier is still warming up or when only trusted detector hits exist?
 28. What does the system currently do when Qwen returns no boxes for segmentation?
 29. Why does the current pipeline reject unsupported simple exact-object labels early?
 
