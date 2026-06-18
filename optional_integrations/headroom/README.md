@@ -15,6 +15,10 @@ If you do not want Headroom later, you can remove this entire folder without aff
 
 Headroom is **not active by default** in this repository.
 
+Current project context snapshot for optional Headroom compression or agent handoff:
+
+- [VISION_GUARD_CONTEXT.md](D:/CDAC_PROJECT/CV_Project/optional_integrations/headroom/VISION_GUARD_CONTEXT.md)
+
 The current app does **not** import Headroom anywhere in:
 
 - `app.py`
