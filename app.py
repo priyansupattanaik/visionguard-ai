@@ -70,7 +70,7 @@ def _sample_videos():
 
 
 def _meta(meta):
-    return (
+    out = (
         f"video: `{os.path.basename(meta['video'])}`\n\n"
         f"- duration: `{meta['duration']:.2f}s`\n"
         f"- fps: `{meta['fps']:.2f}`\n"
@@ -79,6 +79,12 @@ def _meta(meta):
         f"- retriever: `{meta.get('retriever', 'numpy')}`\n"
         f"- verifier: `{meta.get('verifier', 'none')}`"
     )
+    counts = meta.get("object_counts", {})
+    if counts:
+        lines = [f"**{name}**: {n}" for name, n in counts.items()]
+        obj_md = "  ".join(lines)
+        out += "\n\n**Objects detected:**\n" + obj_md
+    return out
 
 
 def _ans(q, rows):

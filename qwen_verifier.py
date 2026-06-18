@@ -59,7 +59,7 @@ class QwenFrameVerifier:
                 dtype="half",
                 limit_mm_per_prompt={"image": 1},
             )
-            self.vllm_sampling = SamplingParams(temperature=0.0, max_tokens=180)
+            self.vllm_sampling = SamplingParams(temperature=0.0, max_tokens=100)
             self.backend = "vllm"
             return True
         except Exception:
@@ -125,7 +125,7 @@ class QwenFrameVerifier:
             clean.append([x1, y1, x2, y2])
         return clean
 
-    def _ask(self, frame_path, prompt, max_new_tokens=180):
+    def _ask(self, frame_path, prompt, max_new_tokens=100):
         self.load()
         if self.vllm_engine is not None:
             return self._ask_vllm(frame_path, prompt, max_new_tokens=max_new_tokens)
@@ -160,7 +160,7 @@ class QwenFrameVerifier:
         except Exception:
             return ""
 
-    def _ask_vllm(self, frame_path, prompt, max_new_tokens=180):
+    def _ask_vllm(self, frame_path, prompt, max_new_tokens=100):
         if self.vllm_engine is None or not frame_path or not os.path.exists(frame_path):
             return ""
         image = Image.open(frame_path).convert("RGB")

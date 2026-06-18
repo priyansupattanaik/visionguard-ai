@@ -9,10 +9,19 @@ class SearchEncoder:
     def __init__(self, model="google/siglip2-so400m-patch14-384", device=None):
         self.model_name = model
         self.dev = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.image_batch_size = 24 if self.dev == "cuda" else 8
+        self.image_batch_size = self._default_image_batch_size()
         self.p = None
         self.m = None
         self.compiled = False
+
+    def _default_image_batch_size(self):
+        if self.dev != "cuda":
+            return 8
+        try:
+            gpu_name = torch.cuda.get_device_name(0).lower()
+        except Exception:
+            gpu_name = ""
+        return 32 if "a100" in gpu_name else 16
 
     def load(self):
         if self.m is not None:
@@ -73,8 +82,12 @@ class SearchEncoder:
             batch = frames[offset: offset + self.image_batch_size]
             imgs = [Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)) for frame in batch]
             inp = self.p(images=imgs, return_tensors="pt").to(self.dev)
-            with torch.no_grad():
-                vecs = self._vec(self.m.get_image_features(**inp)).detach().cpu().numpy()
+            if self.dev == "cuda":
+                with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.float16):
+                    vecs = self._vec(self.m.get_image_features(**inp)).detach().cpu().numpy()
+            else:
+                with torch.no_grad():
+                    vecs = self._vec(self.m.get_image_features(**inp)).detach().cpu().numpy()
             for vec in vecs:
                 n = np.linalg.norm(vec)
                 if n == 0:

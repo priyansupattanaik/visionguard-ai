@@ -36,7 +36,7 @@ class VisionGuardPipeline:
         self.last_hits = []
         self.search_idx = SegmentVectorIndex(bit_width=4)
         self.frame_idx = SegmentVectorIndex(bit_width=4)
-        self.pool = ThreadPoolExecutor(max_workers=2)
+        self.pool = ThreadPoolExecutor(max_workers=4)
         self.raw_jobs = {}
         self.seg_jobs = {}
         os.makedirs(out_dir, exist_ok=True)
@@ -498,8 +498,22 @@ class VisionGuardPipeline:
         if not rows:
             return rows
         take = min(top_n, len(rows))
-        for i in range(take):
-            result = self.ver.verify_query(rows[i].get("representative_frame_path", rows[i]["frame_path"]), query, frame_key=rows[i].get("cache_key"))
+        futures = {
+            self.pool.submit(
+                self.ver.verify_query,
+                rows[i].get("representative_frame_path", rows[i]["frame_path"]),
+                query,
+                rows[i].get("cache_key"),
+            ): i
+            for i in range(take)
+        }
+        results = [None] * take
+        for future, idx in futures.items():
+            try:
+                results[idx] = future.result(timeout=30)
+            except Exception:
+                results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": []}
+        for i, result in enumerate(results):
             boxes = result.get("boxes", [])
             caption = result.get("caption", "")
             matched = bool(result.get("matched"))
@@ -528,8 +542,22 @@ class VisionGuardPipeline:
         if not rows:
             return
         take = min(top_n, len(rows))
-        for i in range(take):
-            result = self.ver.verify_query(rows[i].get("representative_frame_path", rows[i]["frame_path"]), query, frame_key=rows[i].get("cache_key"))
+        futures = {
+            self.pool.submit(
+                self.ver.verify_query,
+                rows[i].get("representative_frame_path", rows[i]["frame_path"]),
+                query,
+                rows[i].get("cache_key"),
+            ): i
+            for i in range(take)
+        }
+        results = [None] * take
+        for future, idx in futures.items():
+            try:
+                results[idx] = future.result(timeout=30)
+            except Exception:
+                results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": []}
+        for i, result in enumerate(results):
             boxes = result.get("boxes", [])
             caption = result.get("caption", "")
             matched = bool(result.get("matched"))
@@ -692,7 +720,13 @@ class VisionGuardPipeline:
             nonlocal frames, pending, frame_vec_chunks, frame_id_chunks
             if not pending:
                 return
+            write_futures = [
+                self.pool.submit(cv2.imwrite, item["frame_path"], item["frame"])
+                for item in pending
+            ]
             emb_list = self.enc.embed_frames([x["frame"] for x in pending])
+            for future in write_futures:
+                future.result()
             chunk_vecs = []
             chunk_ids = []
             for item, emb in zip(pending, emb_list):
@@ -761,7 +795,6 @@ class VisionGuardPipeline:
                     "person": objs.get("person", 0),
                 }
                 frame_path = os.path.join(self.run_dir, "frames", f"f_{i:06d}.jpg")
-                cv2.imwrite(frame_path, frame)
                 pending.append({
                     "frame_idx": i,
                     "ts": ts,
@@ -863,6 +896,16 @@ class VisionGuardPipeline:
             ],
             "segments": segs,
         }
+        from collections import Counter
+
+        _obj_counter = Counter()
+        for _row in self.idx["frames"]:
+            for _obj in _row.get("objects", []):
+                _obj_counter[_obj] += 1
+
+        self.idx["meta"]["object_counts"] = dict(_obj_counter.most_common())
+        self.idx["meta"]["total_detections"] = sum(_obj_counter.values())
+        self.idx["meta"]["unique_objects"] = len(_obj_counter)
         frame_chunks = list(zip(frame_vec_chunks, frame_id_chunks))
         seg_chunks = list(zip(seg_vec_chunks, seg_id_chunks))
         self.frame_idx.build_merged(frame_chunks, path=os.path.join(self.run_dir, "reports", "frame_index.tvim"))
