@@ -22,7 +22,7 @@ setup_cache()
 
 
 class VisionGuardPipeline:
-    def __init__(self, out_dir="output", yolo="yolo11n.pt", clip_model="google/siglip2-so400m-patch14-384", verifier_model="Qwen/Qwen2.5-VL-7B-Instruct-AWQ", sam="facebook/sam2.1-hiera-small"):
+    def __init__(self, out_dir="output", yolo="yolo11m.pt", clip_model="google/siglip2-so400m-patch14-384", verifier_model="Qwen/Qwen2.5-VL-7B-Instruct-AWQ", sam="facebook/sam2.1-hiera-small"):
         self.out_dir = out_dir
         self.trk = ObjectTracker(model=yolo)
         self.enc = SearchEncoder(model=clip_model)
@@ -218,9 +218,18 @@ class VisionGuardPipeline:
         for k, rows in m.items():
             if any(x in q for x in rows):
                 out.add(k)
-        if any(x in q for x in [" accident ", " collision ", " crash ", " hit-and-run ", " pileup "]):
-            out |= {"car", "truck", "bus", "motorcycle", "bicycle"}
         return sorted(out)
+
+    def _is_event_query(self, q):
+        q = f" {self._normalize_query(q)} "
+        terms = {
+            " accident ", " collision ", " crash ", " hit-and-run ", " pileup ",
+            " fight ", " fighting ", " assault ", " brawl ",
+            " fall ", " falling ", " collapse ",
+            " crowd ", " crowded ", " gathering ",
+            " loitering ", " loiter ", " suspicious ", " violence ",
+        }
+        return any(term in q for term in terms)
 
     def _normalize_query(self, q):
         q = q.strip().lower()
@@ -265,6 +274,18 @@ class VisionGuardPipeline:
             "yellow", "white", "black", "gray", "red", "blue", "green", "orange", "brown",
         }
         return all(x in allowed for x in tokens)
+
+    def _is_simple_unsupported_object_query(self, q):
+        tokens = self._normalize_query(q).split()
+        if not tokens or self._q_objs(q) or self._is_event_query(q):
+            return False
+        color_words = set(self._color_words().keys())
+        stop_words = {
+            "a", "an", "the", "near", "next", "beside", "behind", "front", "of",
+            "on", "in", "at", "with", "without", "left", "right", "top", "bottom",
+        }
+        content = [x for x in tokens if x not in color_words and x not in stop_words]
+        return 0 < len(content) <= 2
 
     def _matching_detections(self, row, qobjs, qcolors, cls_to_name=None):
         out = []
@@ -385,47 +406,6 @@ class VisionGuardPipeline:
         original = " ".join(q.strip().lower().split())
         ql = self._normalize_query(q)
         out = [original, ql] if original and original != ql else [ql]
-        groups = {
-            "accident": [
-                "traffic accident",
-                "vehicle collision",
-                "car crash",
-                "vehicles hitting each other",
-            ],
-            "collision": [
-                "traffic collision",
-                "vehicle crash",
-                "cars colliding",
-            ],
-            "crash": [
-                "vehicle crash",
-                "traffic accident",
-                "cars hitting each other",
-            ],
-            "fight": [
-                "people fighting",
-                "physical fight",
-                "person attacking another person",
-            ],
-            "fall": [
-                "person falling",
-                "person on the ground after a fall",
-                "human fall incident",
-            ],
-            "crowd": [
-                "crowd of people",
-                "many people gathered together",
-                "group of people",
-            ],
-            "loitering": [
-                "person standing around",
-                "person waiting near one place",
-                "person staying in the same area",
-            ],
-        }
-        for key, vals in groups.items():
-            if key in ql:
-                out.extend(vals)
         seen = set()
         uniq = []
         for item in out:
@@ -960,6 +940,10 @@ class VisionGuardPipeline:
         ql = q
         qobjs = self._q_objs(q)
         qcolors = set(self._query_colors(q))
+        if self._is_event_query(raw_q):
+            return q, qv, qobjs, [], 0
+        if self._is_simple_unsupported_object_query(raw_q):
+            return q, qv, qobjs, [], 0
         detector_hits = self._refine_detector_hits(q, top_k)
         if detector_hits:
             hits = self._apply_reselection(detector_hits, q, qv, top_n=1)
@@ -992,8 +976,6 @@ class VisionGuardPipeline:
                     score += 0.22 * color_hit
                 else:
                     score -= 0.12
-            if any(x in ql for x in ["accident", "collision", "crash"]) and sobj & {"car", "truck", "bus", "motorcycle", "bicycle"}:
-                score += 0.08
             if "sitting" in ql and "person" in sobj:
                 score += 0.05
             rows.append({
@@ -1020,7 +1002,7 @@ class VisionGuardPipeline:
         if obj_hits:
             obj_hits = self._apply_reselection(obj_hits, q, qv, top_n=min(2, len(obj_hits)))
             return q, qv, qobjs, obj_hits, min(4, len(obj_hits))
-        if ranked_rows:
+        if ranked_rows and not self._is_strict_object_query(q):
             weak = self._cluster_frame_hits(ranked_rows[: max(top_k * 3, 8)], top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
             for hit in weak:
                 hit["summary"] = f"low-confidence visual match at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects']) if hit['objects'] else 'no tracked objects'}"
@@ -1048,8 +1030,6 @@ class VisionGuardPipeline:
                     score += 0.12 * hit
                 else:
                     score -= 0.1
-            if any(x in ql for x in ["accident", "collision", "crash"]) and sobj & {"car", "truck", "bus", "motorcycle", "bicycle"}:
-                score += 0.08
             if "sitting" in ql and "person" in sobj:
                 score += 0.05
             seg_rows.append({

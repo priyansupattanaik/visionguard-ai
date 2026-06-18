@@ -188,7 +188,7 @@ with gr.Blocks(title="Vision Guard", css=css, theme=theme) as demo:
             status = gr.Markdown("ready")
             live = gr.Image(label="live indexing preview", interactive=False, elem_classes="hidden-empty")
             info = gr.Markdown(elem_classes="tight-md")
-            query = gr.Textbox(label="query", placeholder="person sitting near gate, white car entering, fight near road, car accident", interactive=False)
+            query = gr.Textbox(label="query", placeholder="person near gate, white car entering, blue truck, umbrella, backpack", interactive=False)
             searched = gr.Markdown(elem_classes="tight-md")
             find_btn = gr.Button("step 2: find matches", interactive=False)
 

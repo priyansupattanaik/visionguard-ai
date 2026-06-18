@@ -37,7 +37,7 @@ Open:
 
 - UI: Gradio
 - Video reading: Decord
-- Detection + tracking: YOLO11n + BoT-SORT
+- Detection + tracking: YOLO11m + BoT-SORT
 - Retrieval: SigLIP2
 - Verification + grounding: Qwen2.5-VL-7B-Instruct-AWQ
 - Segmentation: SAM2.1-hiera-small
@@ -60,5 +60,6 @@ The intended Colab flow is:
 
 - The first run is slow because model weights need to load.
 - Drive-backed caching is used so later Colab sessions can reuse downloads.
-- Temporal events like collision, fight, and fall are not guaranteed to be perfect.
+- The current query path is object-focused. Event detection is intentionally disabled for now.
+- Unsupported exact object labels return no exact matches instead of loose semantic substitutions.
 - Headroom is documented as an optional external context-compression layer only. It is not active in the default app runtime.

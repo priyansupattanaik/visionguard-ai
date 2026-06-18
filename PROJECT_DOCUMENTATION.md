@@ -36,6 +36,7 @@ The tracked repository files are:
 - `cache_utils.py`
 - `clip_generator.py`
 - `optional_integrations/headroom/README.md`
+- `optional_integrations/headroom/VISION_GUARD_CONTEXT.md`
 - `pipeline.py`
 - `qwen_verifier.py`
 - `report_generator.py`
@@ -123,14 +124,15 @@ Query handling inside the pipeline:
 
 1. normalize the query
 2. derive detector object classes and color terms if possible
-3. embed multiple query variants with SigLIP2
-4. try detector-first retrieval
-5. if that fails, try frame-level ANN retrieval
-6. if that fails, try object fallback matching from stored detection metadata
-7. if that fails, try segment-level ANN retrieval
-8. reselect best frame inside the clip window using denser 0.1s probing
-9. verify top candidates with Qwen
-10. attach grounded or detector boxes for the first gallery image
+3. reject event-style queries and unsupported simple exact-object labels
+4. embed normalized query text with SigLIP2
+5. try detector-first retrieval
+6. if that fails, try frame-level ANN retrieval
+7. if that fails, try object fallback matching from stored detection metadata
+8. if that fails, try segment-level ANN retrieval
+9. reselect best frame inside the clip window using denser 0.1s probing
+10. verify top candidates with Qwen using exact-label and localization constraints
+11. attach grounded or detector boxes for the first gallery image
 
 ### 5.4 Export flow
 
@@ -412,10 +414,7 @@ Constructor signature:
 
 Important implementation detail:
 
-- `pipeline.py` does not use this constructor default.
-- `VisionGuardPipeline.__init__` currently passes `yolo="yolo11n.pt"` by default into `ObjectTracker(model=yolo)`.
-- Therefore the pipeline-level default detector remains `yolo11n.pt` unless the pipeline is instantiated with another `yolo` argument.
-- This is a real code-level mismatch between `pipeline.py` and `tracker.py`.
+- `VisionGuardPipeline.__init__` also defaults to `yolo="yolo11m.pt"`, so the pipeline and tracker defaults are aligned.
 
 Methods:
 
@@ -630,7 +629,7 @@ Class: `VisionGuardPipeline`
 Constructor signature:
 
 - `out_dir="output"`
-- `yolo="yolo11n.pt"`
+- `yolo="yolo11m.pt"`
 - `clip_model="google/siglip2-so400m-patch14-384"`
 - `verifier_model="Qwen/Qwen2.5-VL-7B-Instruct-AWQ"`
 - `sam="facebook/sam2.1-hiera-small"`
@@ -664,9 +663,11 @@ Methods:
 - `_estimate_color(frame, box)`
 - `_appearance_tags(frame, detections)`
 - `_q_objs(q)`
+- `_is_event_query(q)`
 - `_normalize_query(q)`
 - `_query_detector_classes(q)`
 - `_is_strict_object_query(q)`
+- `_is_simple_unsupported_object_query(q)`
 - `_matching_detections(row, qobjs, qcolors, cls_to_name=None)`
 - `_query_variants(q)`
 - `_embed_query(q)`
@@ -675,9 +676,11 @@ These methods implement:
 
 - singular/plural normalization
 - limited synonym mapping
-- coarse event-to-object expansion
 - explicit color extraction for vehicles
-- query variant generation for several event classes
+- object-class extraction for supported detector labels
+- event-query rejection
+- rejection of unsupported simple exact-object labels
+- minimal query variant generation using original and normalized forms
 
 #### Scan-time helpers
 
@@ -845,8 +848,13 @@ Search order in `_candidate_hits()`:
 1. detector-first hits
 2. frame ANN hits
 3. object fallback hits
-4. low-confidence clustered frame hits
+4. low-confidence clustered frame hits for non-strict queries only
 5. segment ANN hits
+
+Important behavior:
+
+- event-style queries return no matches
+- unsupported simple exact-object labels return no exact matches instead of semantic substitutions
 
 #### Clip generation and segmentation jobs
 
@@ -885,14 +893,7 @@ Current contents:
 - describes current stack
 - gives Colab run outline
 
-Important discrepancy:
-
-- README currently says `Detection + tracking: YOLO11n + BoT-SORT`
-- source code is split:
-  - `tracker.py` default constructor uses `yolo11m.pt`
-  - `pipeline.py` default constructor passes `yolo11n.pt`
-
-So the README statement is only accurate for the default `VisionGuardPipeline()` instantiation path, not for `ObjectTracker` in isolation.
+README now matches the current detector default used by the pipeline.
 
 ### 6.13 `VisionGuard_Colab.ipynb`
 
@@ -1023,8 +1024,7 @@ Concrete reasoning layers:
 
 1. lexical normalization:
    - plurals
-   - a small synonym table
-   - a small event-to-object mapping
+   - a small synonym table for supported detector classes
 2. semantic embedding search:
    - SigLIP2 text-to-frame/segment similarity
 3. detector metadata matching:
@@ -1168,19 +1168,7 @@ Each scan creates a timestamped run directory under `output/`:
 
 This section is limited to issues directly visible in source.
 
-### 12.1 Detector default mismatch
-
-Code evidence:
-
-- `pipeline.py` constructor default: `yolo="yolo11n.pt"`
-- `tracker.py` constructor default: `model="yolo11m.pt"`
-
-Effect:
-
-- `VisionGuardPipeline()` currently uses `yolo11n.pt` unless explicitly overridden.
-- `ObjectTracker()` alone would default to `yolo11m.pt`.
-
-### 12.2 Windows CPU verifier bypass
+### 12.1 Windows CPU verifier bypass
 
 Code evidence:
 
@@ -1192,7 +1180,7 @@ Effect:
 
 - local Windows CPU runs are not an accuracy-faithful verifier environment
 
-### 12.3 `search_stream()` emits only confirmed rows
+### 12.2 `search_stream()` emits only confirmed rows
 
 Code evidence:
 
@@ -1204,20 +1192,26 @@ Effect:
 
 - low-confidence candidates produced by `_candidate_hits()` are not surfaced through the streaming path unless they become confirmed
 
-### 12.4 `index.json` generation references `x["meta"]` on normalized frame rows
+### 12.3 Unsupported simple exact-object labels return no matches
 
-In the `self.rep.write_json(...)` block inside `index_video_iter()`, the frame list comprehension iterates over `self.idx["frames"]` and accesses:
+Code evidence:
 
-- `x["meta"].get("motion_score", 0.0)`
-- `x["meta"].get("keep_reason", "")`
-- `x["meta"].get("still_people", 0)`
-- `x["meta"].get("object_delta", 0)`
-
-But `self.idx["frames"]` rows are created without a nested `meta` object; those fields are flattened at top level.
+- `_is_simple_unsupported_object_query()` returns early before semantic candidate retrieval
+- `_candidate_hits()` uses that early return
 
 Effect:
 
-- this path is internally inconsistent in current code and should be treated as a real audit finding
+- queries such as `taxi` do not fall through to loose car-like visual matches
+
+### 12.4 Event-style queries are intentionally disabled
+
+Code evidence:
+
+- `_is_event_query()` returns early before retrieval
+
+Effect:
+
+- terms such as collision, fight, fall, crowd, and loitering are currently out of scope for search results
 
 ### 12.5 Segmentation is export-time, not scan-time
 
@@ -1297,8 +1291,8 @@ The practical design split is:
 
 11. How are color-specific queries such as `yellow car` handled?
 12. What are the risks of the HSV-based vehicle color heuristic?
-13. Why does `_q_objs()` expand some event words into vehicle classes?
-14. Why might a strict object query still fail even when the object is present?
+13. Why might a strict object query still fail even when the object is present?
+14. Why does the system return no match for an unsupported label like `taxi` instead of a similar object such as `car`?
 15. How would you explain the difference between `detections`, `objects`, and `appearances` in the stored metadata?
 
 ### Model-serving behavior
@@ -1320,26 +1314,25 @@ The practical design split is:
 ### Reliability and correctness
 
 26. What does `warmup_status()` protect against compared with the previous silent warmup path?
-27. What code-evident inconsistency exists in model defaults?
-28. What code-evident inconsistency exists in `index.json` writing?
-29. Why is `search_stream()` behavior important to understand when debugging "no results" issues?
-30. What does the system currently do when Qwen returns no boxes for segmentation?
+27. Why is `search_stream()` behavior important to understand when debugging "no results" issues?
+28. What does the system currently do when Qwen returns no boxes for segmentation?
+29. Why does the current pipeline reject unsupported simple exact-object labels early?
 
 ### Export and UX
 
-31. Why does the gallery box rendering target only the first prepared hit by default?
-32. Why are raw clips and segmented clips both preserved?
-33. What makes the exported HTML report deterministic versus runtime-variable?
-34. Why does the ZIP contain clips but not every generated still frame?
-35. How would you explain to a reviewer why the UI uses one status component for both warmup and scan feedback?
+30. Why does the gallery box rendering target only the first prepared hit by default?
+31. Why are raw clips and segmented clips both preserved?
+32. What makes the exported HTML report deterministic versus runtime-variable?
+33. Why does the ZIP contain clips but not every generated still frame?
+34. How would you explain to a reviewer why the UI uses one status component for both warmup and scan feedback?
 
 ### Deployment and operations
 
-36. Why does `setup_cache()` early-return outside Google Drive?
-37. Why is `GRADIO_SHARE=1` the expected Colab execution path in the notebook?
-38. What happens if `HF_TOKEN` is missing?
-39. Why are YOLO weights copied into Drive cache after download?
-40. If you needed reproducible deployment behavior, what code paths in this repo would you audit first?
+35. Why does `setup_cache()` early-return outside Google Drive?
+36. Why is `GRADIO_SHARE=1` the expected Colab execution path in the notebook?
+37. What happens if `HF_TOKEN` is missing?
+38. Why are YOLO weights copied into Drive cache after download?
+39. If you needed reproducible deployment behavior, what code paths in this repo would you audit first?
 
 ## 17. Short Summary
 

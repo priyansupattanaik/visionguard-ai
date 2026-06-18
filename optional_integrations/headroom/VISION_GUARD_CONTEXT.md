@@ -78,12 +78,7 @@ Completed result:
 - `.gitignore` contains both:
   - `yolo11n.pt`
   - `yolo11m.pt`
-
-Important code-level note:
-
-- `pipeline.py:VisionGuardPipeline.__init__` still defaults `yolo="yolo11n.pt"`
-- so `VisionGuardPipeline()` still passes `yolo11n.pt` unless explicitly overridden
-- `tracker.py` and `pipeline.py` currently disagree on detector default
+- `pipeline.py:VisionGuardPipeline.__init__` now also defaults to `yolo="yolo11m.pt"`
 
 ### Phase 3
 
@@ -178,14 +173,14 @@ From `pipeline.py:index_video_iter(...)`:
 From `pipeline.py`:
 
 1. Normalize query
-2. Expand query variants
-3. Embed query with SigLIP2
+2. Reject event-style queries and unsupported simple exact-object labels
+3. Embed normalized query with SigLIP2
 4. Try detector-first retrieval
 5. Try frame ANN retrieval
 6. Try object fallback retrieval
 7. Try segment ANN retrieval
 8. Reselect dense best frame inside candidate time window
-9. Verify top candidates with Qwen
+9. Verify top candidates with Qwen using exact-label constraints
 10. Prepare gallery/result rows
 
 ## Current Export Pipeline Summary
@@ -223,24 +218,27 @@ Expected usage:
 
 These are evidence-based and visible in current source.
 
-### 1. Detector default mismatch
-
-- `tracker.py` default model is `yolo11m.pt`
-- `pipeline.py` default pipeline parameter is `yolo11n.pt`
-
-### 2. Windows CPU verifier bypass
+### 1. Windows CPU verifier bypass
 
 - `qwen_verifier.py` bypasses real Qwen inference on Windows without CUDA
 
-### 3. Warmup is now visible, not silent
+### 2. Warmup is now visible, not silent
 
 - failures are exposed through `warmup_status()`
 
-### 4. `search_stream()` only emits confirmed rows
+### 3. `search_stream()` only emits confirmed rows
 
 - low-confidence rows are not streamed unless they become verified matches
 
-### 5. Current documentation source of truth
+### 4. Unsupported simple exact-object labels return no matches
+
+- `taxi`-style unsupported exact labels are rejected early instead of loosely matching `car`
+
+### 5. Event-style queries are intentionally disabled
+
+- collision, fight, fall, crowd, and loitering are currently out of scope
+
+### 6. Current documentation source of truth
 
 - full audited repo documentation lives in `PROJECT_DOCUMENTATION.md`
 

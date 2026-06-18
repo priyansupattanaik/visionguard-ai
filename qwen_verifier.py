@@ -214,7 +214,12 @@ class QwenFrameVerifier:
         prompt = (
             "You are verifying CCTV search results. "
             "Decide whether the image clearly satisfies the exact user query. "
-            "For events, answer true only if the event is visible in this frame. "
+            "Treat the query literally and conservatively. "
+            "Do not substitute a similar object class for the exact queried class. "
+            "For example, a generic car is not a taxi unless explicit taxi markings or signage are visible. "
+            "A truck is not a bus. A handbag is not a backpack. "
+            "Return matched=true only when the queried object or phrase is visibly present and localizable in the frame. "
+            "If matched=true, provide at least one tight box around the visible matching region. "
             "Do not infer beyond the visible evidence. "
             f"User query: {query}\n"
             "Return JSON only with keys: matched(boolean), confidence(number 0 to 1), "
@@ -225,6 +230,8 @@ class QwenFrameVerifier:
         boxes = self._clean_boxes(data.get("boxes", []), image.size)
         matched = bool(data.get("matched", False))
         confidence = float(data.get("confidence", 0.0) or 0.0)
+        if matched and not boxes:
+            matched = False
         if confidence < self._confidence_threshold(query):
             matched = False
         result = {
