@@ -897,15 +897,15 @@ class VisionGuardPipeline:
                     {
                         "frame_id": x["frame_id"],
                         "ts": x["ts"],
-                    "frame_path": x["frame_path"],
-                    "objects": x["objects"],
-                    "appearances": x["appearances"],
-                    "detections": x["detections"],
-                    "motion_score": x["meta"].get("motion_score", 0.0),
-                    "keep_reason": x["meta"].get("keep_reason", ""),
-                    "still_people": x["meta"].get("still_people", 0),
-                    "object_delta": x["meta"].get("object_delta", 0),
-                }
+                        "frame_path": x["frame_path"],
+                        "objects": x["objects"],
+                        "appearances": x["appearances"],
+                        "detections": x["detections"],
+                        "motion_score": x.get("motion_score", 0.0),
+                        "keep_reason": x.get("keep_reason", ""),
+                        "still_people": x.get("still_people", 0),
+                        "object_delta": x.get("object_delta", 0),
+                    }
                     for x in self.idx["frames"]
                 ],
                 "segments": [
