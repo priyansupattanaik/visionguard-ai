@@ -62,4 +62,5 @@ The intended Colab flow is:
 - Drive-backed caching is used so later Colab sessions can reuse downloads.
 - The current query path is object-focused. Event detection is intentionally disabled for now.
 - Unsupported exact object labels return no exact matches instead of loose semantic substitutions.
+- Strong detector hits are still surfaced even if the verifier is too conservative on the same frame.
 - Headroom is documented as an optional external context-compression layer only. It is not active in the default app runtime.

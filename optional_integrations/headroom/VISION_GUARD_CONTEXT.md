@@ -183,6 +183,10 @@ From `pipeline.py`:
 9. Verify top candidates with Qwen using exact-label constraints
 10. Prepare gallery/result rows
 
+Important behavior:
+
+- supported detector/object queries can still surface trusted detector hits even when verifier confirmation is absent
+
 ## Current Export Pipeline Summary
 
 From `pipeline.py:export_selected(...)`:

@@ -329,6 +329,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": score,
                 "base_score": score,
+                "retrieval_mode": "detector",
                 "frame_id": row.get("frame_id"),
                 "ts": row["ts"],
                 "representative_frame_path": row["frame_path"],
@@ -355,6 +356,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": row["score"],
                 "base_score": row["base_score"],
+                "retrieval_mode": "detector",
                 "cache_key": f"frame:{row.get('frame_id', row['ts'])}",
                 "start": start,
                 "end": end,
@@ -619,6 +621,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": score,
                 "base_score": score,
+                "retrieval_mode": "object_fallback",
                 "frame_id": row.get("frame_id"),
                 "ts": row["ts"],
                 "representative_frame_path": row["frame_path"],
@@ -642,6 +645,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": row["score"],
                 "base_score": row["base_score"],
+                "retrieval_mode": "object_fallback",
                 "cache_key": f"frame:{row.get('frame_id', row['ts'])}",
                 "start": start,
                 "end": end,
@@ -982,6 +986,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": score,
                 "base_score": float(base_score),
+                "retrieval_mode": "semantic_frame",
                 "frame_id": row["frame_id"],
                 "ts": row["ts"],
                 "representative_frame_path": row["frame_path"],
@@ -1007,6 +1012,7 @@ class VisionGuardPipeline:
             for hit in weak:
                 hit["summary"] = f"low-confidence visual match at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects']) if hit['objects'] else 'no tracked objects'}"
                 hit["low_confidence"] = True
+                hit["retrieval_mode"] = "weak_semantic"
             if weak:
                 weak = self._apply_reselection(weak, q, qv, top_n=min(2, len(weak)))
                 verify_n = min(8, len(weak)) if not qobjs else 1
@@ -1036,6 +1042,7 @@ class VisionGuardPipeline:
                 "query": q,
                 "score": score,
                 "base_score": float(base_score),
+                "retrieval_mode": "segment",
                 "cache_key": f"seg:{int(seg['seg_id'])}",
                 "start": seg["start"],
                 "end": seg["end"],
@@ -1065,7 +1072,7 @@ class VisionGuardPipeline:
         return q, qv, qobjs, [], 0
 
     def search_stream(self, raw_q, top_k=4):
-        q, _, _, candidates, verify_n = self._candidate_hits(raw_q, top_k=top_k)
+        q, _, qobjs, candidates, verify_n = self._candidate_hits(raw_q, top_k=top_k)
         if not candidates:
             yield []
             return
@@ -1080,14 +1087,24 @@ class VisionGuardPipeline:
                     emitted.add(key)
                     yield confirmed
         if not emitted:
-            yield []
+            trusted = [x for x in working if x.get("retrieval_mode") in {"detector", "object_fallback"}]
+            if qobjs and trusted:
+                yield sorted(trusted, key=lambda x: x["score"], reverse=True)[:top_k]
+            else:
+                yield []
 
     def search(self, q, top_k=4):
-        checked_q, _, _, candidates, verify_n = self._candidate_hits(q.strip(), top_k=top_k)
+        checked_q, _, qobjs, candidates, verify_n = self._candidate_hits(q.strip(), top_k=top_k)
         if not candidates:
             return []
         checked = self._verify_rows(candidates, checked_q, top_n=verify_n)
-        return self._confirmed_rows(checked)[:top_k]
+        confirmed = self._confirmed_rows(checked)[:top_k]
+        if confirmed:
+            return confirmed
+        trusted = [x for x in checked if x.get("retrieval_mode") in {"detector", "object_fallback"}]
+        if qobjs and trusted:
+            return sorted(trusted, key=lambda x: x["score"], reverse=True)[:top_k]
+        return []
 
     def prepare_hits(self, hits, query):
         out = []

@@ -855,6 +855,7 @@ Important behavior:
 
 - event-style queries return no matches
 - unsupported simple exact-object labels return no exact matches instead of semantic substitutions
+- strong detector and object-fallback hits can still be surfaced for supported object queries even when verifier confirmation is absent
 
 #### Clip generation and segmentation jobs
 
@@ -1190,7 +1191,8 @@ Code evidence:
 
 Effect:
 
-- low-confidence candidates produced by `_candidate_hits()` are not surfaced through the streaming path unless they become confirmed
+- low-confidence semantic candidates produced by `_candidate_hits()` are not surfaced through the streaming path unless they become confirmed
+- trusted detector and object-fallback hits are still surfaced for supported object queries even when verifier confirmation is absent
 
 ### 12.3 Unsupported simple exact-object labels return no matches
 
