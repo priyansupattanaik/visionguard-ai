@@ -27,16 +27,10 @@ class SearchEncoder:
         self._maybe_compile()
 
     def _maybe_compile(self):
-        if self.compiled or self.dev != "cuda" or not hasattr(torch, "compile"):
-            return
-        target = getattr(self.m, "vision_model", None)
-        if target is None:
-            return
-        try:
-            self.m.vision_model = torch.compile(target, mode="reduce-overhead", fullgraph=False)
-            self.compiled = True
-        except Exception:
-            self.compiled = False
+        # torch.compile with CUDA graphs is incompatible with Gradio's
+        # worker-thread execution model (TLS assertion failure at runtime).
+        # SigLIP2-So400m is fast enough on GPU without compilation.
+        self.compiled = False
 
     def _vec(self, x):
         if hasattr(x, "pooler_output"):

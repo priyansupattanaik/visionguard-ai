@@ -950,7 +950,7 @@ class VisionGuardPipeline:
             return q, qv, qobjs, [], 0
         detector_hits = self._refine_detector_hits(q, top_k)
         if detector_hits:
-            hits = self._apply_reselection(detector_hits, q, qv, top_n=1)
+            hits = self._apply_reselection(detector_hits, q, qv, top_n=min(4, len(detector_hits)))
             return q, qv, qobjs, hits, min(2, len(hits))
         frames = self.idx.get("frames", [])
         frame_map = {int(x["frame_id"]): x for x in frames}
@@ -1000,12 +1000,12 @@ class VisionGuardPipeline:
         rows = [x for x in ranked_rows if x["score"] >= 0.14]
         out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
         if out:
-            out = self._apply_reselection(out, q, qv, top_n=min(2, len(out)))
+            out = self._apply_reselection(out, q, qv, top_n=min(4, len(out)))
             verify_n = min(8, len(out)) if not qobjs else min(4, len(out))
             return q, qv, qobjs, out, verify_n
         obj_hits = self._fallback_object_hits(q, top_k)
         if obj_hits:
-            obj_hits = self._apply_reselection(obj_hits, q, qv, top_n=min(2, len(obj_hits)))
+            obj_hits = self._apply_reselection(obj_hits, q, qv, top_n=min(4, len(obj_hits)))
             return q, qv, qobjs, obj_hits, min(4, len(obj_hits))
         if ranked_rows and not self._is_strict_object_query(q):
             weak = self._cluster_frame_hits(ranked_rows[: max(top_k * 3, 8)], top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
@@ -1014,7 +1014,7 @@ class VisionGuardPipeline:
                 hit["low_confidence"] = True
                 hit["retrieval_mode"] = "weak_semantic"
             if weak:
-                weak = self._apply_reselection(weak, q, qv, top_n=min(2, len(weak)))
+                weak = self._apply_reselection(weak, q, qv, top_n=min(4, len(weak)))
                 verify_n = min(8, len(weak)) if not qobjs else 1
                 return q, qv, qobjs, weak, verify_n
         n = len(self.idx["segments"])
@@ -1066,7 +1066,7 @@ class VisionGuardPipeline:
                 continue
             out.append(row)
         if out:
-            out = self._apply_reselection(out, q, qv, top_n=min(2, len(out)))
+            out = self._apply_reselection(out, q, qv, top_n=min(4, len(out)))
             verify_n = min(8, len(out)) if not qobjs else min(4, len(out))
             return q, qv, qobjs, out, verify_n
         return q, qv, qobjs, [], 0
@@ -1076,6 +1076,11 @@ class VisionGuardPipeline:
         if not candidates:
             yield []
             return
+        if not self.ver.backend or self.ver.backend == "none":
+            for _ in range(30):
+                if self.ver.backend not in (None, "none"):
+                    break
+                time.sleep(1)
         working = [dict(x) for x in candidates]
         confirmed = []
         emitted = set()
@@ -1097,6 +1102,11 @@ class VisionGuardPipeline:
         checked_q, _, qobjs, candidates, verify_n = self._candidate_hits(q.strip(), top_k=top_k)
         if not candidates:
             return []
+        if not self.ver.backend or self.ver.backend == "none":
+            for _ in range(30):
+                if self.ver.backend not in (None, "none"):
+                    break
+                time.sleep(1)
         checked = self._verify_rows(candidates, checked_q, top_n=verify_n)
         confirmed = self._confirmed_rows(checked)[:top_k]
         if confirmed:
