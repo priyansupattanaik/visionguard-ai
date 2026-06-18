@@ -4,6 +4,10 @@ Vision Guard is a scan-first CCTV video search application with a Gradio UI. It 
 
 This repository is intentionally a single-process inference application. There is no training loop, database server, REST API, or external orchestration service in the tracked runtime code.
 
+## Pipeline Overview
+
+![Vision Guard AI: CCTV Search and Analysis Pipeline](CCTV_Search_and_Analysis_Pipeline.png)
+
 ## Documentation
 
 - Full technical manual: [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md)
