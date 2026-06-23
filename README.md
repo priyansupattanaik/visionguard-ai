@@ -147,7 +147,7 @@ Use [VisionGuard_Colab.ipynb](VisionGuard_Colab.ipynb). The intended notebook fl
 
 - UI: Gradio
 - Video access: Decord with OpenCV fallback
-- Detection and tracking wrapper: Ultralytics YOLO with BoT-SORT tracker configuration
+- Detection-first wrapper: Ultralytics YOLO; tracking support exists in `tracker.py` via BoT-SORT config, but the main scan/index path currently uses batched detection rather than persisted track IDs
 - Image/text retrieval model: `google/siglip2-so400m-patch14-384`
 - Visual verification and grounding: `Qwen/Qwen2.5-VL-7B-Instruct-AWQ`
 - Segmentation: `facebook/sam2.1-hiera-small`
@@ -184,6 +184,8 @@ The scan report metadata now includes:
 - `object_counts`
 - `total_detections`
 - `unique_objects`
+
+`object_counts` and `total_detections` are derived from per-frame object-label presence in indexed frames. In other words, they count how many indexed frames contained each label, not the total number of raw detector boxes across the whole video.
 
 ## Read Next
 

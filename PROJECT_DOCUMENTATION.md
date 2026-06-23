@@ -454,8 +454,10 @@ The final yielded Gradio payload also adds:
 After all frame rows are finalized, the pipeline aggregates per-frame object labels into:
 
 - `object_counts`: ordered by descending count
-- `total_detections`: total number of counted object labels across indexed frames
+- `total_detections`: total number of counted object-label presences across indexed frames
 - `unique_objects`: number of unique object labels seen
+
+These counts are derived from the `objects` list stored on each indexed frame row, not from summing every raw detector box across the video. Practically, they behave like "indexed frames containing label X" counters.
 
 The UI then renders this in the scan info panel.
 
@@ -601,7 +603,7 @@ Exposed methods:
 
 Purpose:
 
-- detection and tracking wrapper around Ultralytics YOLO
+- detection-first wrapper around Ultralytics YOLO, with optional tracking support exposed by the helper class
 
 Current defaults:
 
@@ -609,6 +611,11 @@ Current defaults:
 - confidence: `0.22`
 - image size: `640`
 - tracker config: `botsort.yaml`
+
+Current runtime note:
+
+- the main indexing path in `pipeline.py` currently uses `detect_batch()` and stores empty `tracks` lists for indexed frames
+- the `track()` method and BoT-SORT configuration are present in `tracker.py`, but persisted scan-time track IDs are not part of the current indexed data path
 
 Important local infrastructure dependency:
 
@@ -741,7 +748,7 @@ Chosen because the export path requires:
 - `representative_frame_path: str`
 - `objects: list[str]`
 - `appearances: list[str]`
-- `tracks: list`
+- `tracks: list` (currently empty in the active scan/index path)
 - `detections: list[dict]`
 - `motion_score: float`
 - `keep_reason: str`
@@ -757,7 +764,7 @@ Chosen because the export path requires:
 - `emb`
 - `frame_path: str`
 - `objects: list[str]`
-- `tracks: list`
+- `tracks: list` (currently derived from frame rows and therefore empty in the active scan/index path)
 - `temporal_stats: dict`
 - `tags: list`
 
