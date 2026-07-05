@@ -91,6 +91,13 @@ class QwenFrameVerifier:
             self.processor = None
             self.process_vision_info = None
 
+    def verification_mode(self):
+        if self.backend == "dev_passthrough":
+            return "detector_only_dev_passthrough"
+        if self.backend in {"hf", "vllm"}:
+            return "real_qwen"
+        return "unknown"
+
     def _extract_json(self, text):
         if not text:
             return {}
@@ -202,8 +209,9 @@ class QwenFrameVerifier:
             return {
                 "matched": True,
                 "confidence": 0.55,
-                "caption": "[dev mode — Qwen skipped on Windows CPU]",
-                "boxes": []
+                "caption": "[dev mode - Qwen skipped on Windows CPU]",
+                "boxes": [],
+                "verification_mode": self.verification_mode(),
             }
         key = self._cache_key(frame_path, query, frame_key=frame_key)
         if key in self.cache:
@@ -239,6 +247,7 @@ class QwenFrameVerifier:
             "confidence": max(0.0, min(1.0, confidence)),
             "caption": str(data.get("description", "") or "").strip(),
             "boxes": boxes,
+            "verification_mode": self.verification_mode(),
         }
         with self.lock:
             self.cache[key] = dict(result)

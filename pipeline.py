@@ -2,7 +2,7 @@ import os
 import re
 import shutil
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime
 
 import cv2
@@ -512,22 +512,29 @@ class VisionGuardPipeline:
             try:
                 results[idx] = future.result(timeout=30)
             except Exception:
-                results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": []}
+                results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": [], "verification_mode": self.verification_mode()}
         for i, result in enumerate(results):
             boxes = result.get("boxes", [])
             caption = result.get("caption", "")
             matched = bool(result.get("matched"))
             confidence = float(result.get("confidence", 0.0) or 0.0)
+            verification_mode = result.get("verification_mode") or self.verification_mode()
             rows[i]["det_boxes"] = boxes or rows[i].get("det_boxes", [])
             rows[i]["verified_caption"] = caption
             rows[i]["grounded"] = bool(boxes)
             rows[i]["verified_match"] = matched
             rows[i]["verify_score"] = confidence
+            rows[i]["verification_mode"] = verification_mode
             if matched:
                 rows[i]["score"] = float(rows[i]["score"] + min(0.35, 0.16 + 0.18 * confidence))
                 label = ", ".join(rows[i].get("objects", [])) or query
                 detail = caption or f"visible match for {query}"
-                rows[i]["summary"] = f"verified query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
+                if verification_mode == "real_qwen":
+                    rows[i]["summary"] = f"Qwen-verified query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
+                elif verification_mode == "detector_only_dev_passthrough":
+                    rows[i]["summary"] = f"detector-only dev passthrough at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | Qwen skipped on Windows CPU | detected: {label}"
+                else:
+                    rows[i]["summary"] = f"unconfirmed query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
             elif caption:
                 rows[i]["score"] = float(rows[i]["score"] * 0.6)
                 rows[i]["low_confidence"] = True
@@ -556,22 +563,29 @@ class VisionGuardPipeline:
             try:
                 results[idx] = future.result(timeout=30)
             except Exception:
-                results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": []}
+                results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": [], "verification_mode": self.verification_mode()}
         for i, result in enumerate(results):
             boxes = result.get("boxes", [])
             caption = result.get("caption", "")
             matched = bool(result.get("matched"))
             confidence = float(result.get("confidence", 0.0) or 0.0)
+            verification_mode = result.get("verification_mode") or self.verification_mode()
             rows[i]["det_boxes"] = boxes or rows[i].get("det_boxes", [])
             rows[i]["verified_caption"] = caption
             rows[i]["grounded"] = bool(boxes)
             rows[i]["verified_match"] = matched
             rows[i]["verify_score"] = confidence
+            rows[i]["verification_mode"] = verification_mode
             if matched:
                 rows[i]["score"] = float(rows[i]["score"] + min(0.35, 0.16 + 0.18 * confidence))
                 label = ", ".join(rows[i].get("objects", [])) or query
                 detail = caption or f"visible match for {query}"
-                rows[i]["summary"] = f"verified query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
+                if verification_mode == "real_qwen":
+                    rows[i]["summary"] = f"Qwen-verified query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
+                elif verification_mode == "detector_only_dev_passthrough":
+                    rows[i]["summary"] = f"detector-only dev passthrough at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | Qwen skipped on Windows CPU | detected: {label}"
+                else:
+                    rows[i]["summary"] = f"unconfirmed query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
             elif caption:
                 rows[i]["score"] = float(rows[i]["score"] * 0.6)
                 rows[i]["low_confidence"] = True
@@ -981,6 +995,16 @@ class VisionGuardPipeline:
             f"{k} failed: {v}" for k, v in self._warmup_failures.items()
         )
 
+    def verification_mode(self):
+        if hasattr(self.ver, "verification_mode"):
+            return self.ver.verification_mode()
+        backend = getattr(self.ver, "backend", "none")
+        if backend == "dev_passthrough":
+            return "detector_only_dev_passthrough"
+        if backend in {"hf", "vllm"}:
+            return "real_qwen"
+        return "unknown"
+
     def _candidate_hits(self, raw_q, top_k=4):
         q = self._normalize_query(raw_q)
         qv = self._embed_query(raw_q)
@@ -1215,31 +1239,92 @@ class VisionGuardPipeline:
             return
         self.seg_jobs[row["match_id"]] = self.pool.submit(self._segment_payload, dict(row), query)
 
-    def _ensure_segment(self, row, query):
+    def _raw_fallback_payload(self, row, reason):
+        raw = self._ensure_raw_clip(row, wait=True)
+        row["raw_clip"] = raw
+        row["clip"] = raw
+        row["frames"] = []
+        row["segmented"] = False
+        row["export_mode"] = "raw_fallback"
+        row["export_warning"] = f"Raw clip export fallback; segmentation {reason}."
+        if row["export_warning"] not in row["summary"]:
+            row["summary"] = f"{row['summary']} | {row['export_warning']}"
+        return row
+
+    def _ensure_segment(self, row, query, timeout=None, allow_raw_fallback=False):
         if row["segmented"]:
             return row
         job = self.seg_jobs.get(row["match_id"])
         if job is None:
-            payload = self._segment_payload(row, query)
+            if timeout is None:
+                payload = self._segment_payload(row, query)
+            else:
+                job = self.pool.submit(self._segment_payload, dict(row), query)
+                self.seg_jobs[row["match_id"]] = job
+                try:
+                    payload = job.result(timeout=timeout)
+                except TimeoutError:
+                    if allow_raw_fallback:
+                        return self._raw_fallback_payload(row, "timed out")
+                    raise
+                except Exception as exc:
+                    if allow_raw_fallback:
+                        return self._raw_fallback_payload(row, f"failed: {exc}")
+                    raise
         else:
-            payload = job.result()
+            try:
+                payload = job.result(timeout=timeout)
+            except TimeoutError:
+                if allow_raw_fallback:
+                    return self._raw_fallback_payload(row, "timed out")
+                raise
+            except Exception as exc:
+                if allow_raw_fallback:
+                    return self._raw_fallback_payload(row, f"failed: {exc}")
+                raise
         row["raw_clip"] = payload["raw_clip"]
         row["clip"] = payload["clip"]
         row["frames"] = payload["frames"]
         row["segmented"] = bool(payload["seen"] > 0)
+        row["export_mode"] = "segmented" if row["segmented"] else "raw_fallback"
         if payload["seen"] == 0 and "no grounded mask, showing raw clip" not in row["summary"]:
             row["summary"] = f"{row['summary']} | no grounded mask, showing raw clip"
         return row
 
-    def export_selected(self, picks, query):
+    def export_selected_detailed(self, picks, query, segment_timeout=20):
         rows = [x for x in self.last_hits if x["label"] in picks]
         if not rows:
-            return None, None, None
+            return {
+                "ok": False,
+                "message": "No selected matches to export.",
+                "files": {},
+                "rows": [],
+                "export_mode": "none",
+                "warnings": [],
+            }
         for row in rows:
-            self._ensure_segment(row, query)
+            self._ensure_segment(row, query, timeout=segment_timeout, allow_raw_fallback=True)
         base = datetime.now().strftime("%Y%m%d_%H%M%S")
         js = self.rep.write_json(os.path.join(self.run_dir, "reports", f"selected_{base}.json"), {"hits": rows})
         csv = self.rep.write_csv(os.path.join(self.run_dir, "reports", f"selected_{base}.csv"), rows)
         html = self.rep.write_html(os.path.join(self.run_dir, "reports", f"selected_{base}.html"), {"query": rows[0]["query"], "video": self.idx["video"], "hits": rows})
         zipf = self.rep.write_zip(os.path.join(self.run_dir, "reports", f"selected_{base}.zip"), [x["clip"] for x in rows] + [x["raw_clip"] for x in rows])
+        warnings = [x.get("export_warning") for x in rows if x.get("export_warning")]
+        mode = "segmented" if all(x.get("segmented") for x in rows) else "raw_fallback"
+        return {
+            "ok": True,
+            "message": "Export created." if mode == "segmented" else "Raw clip export fallback; segmentation unavailable or timed out.",
+            "files": {"zip": zipf, "html": html, "csv": csv, "json": js},
+            "rows": rows,
+            "export_mode": mode,
+            "warnings": warnings,
+        }
+
+    def export_selected(self, picks, query):
+        result = self.export_selected_detailed(picks, query)
+        if not result["ok"]:
+            return None, None, None
+        zipf = result["files"].get("zip")
+        html = result["files"].get("html")
+        csv = result["files"].get("csv")
         return zipf, html, csv

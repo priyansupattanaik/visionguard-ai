@@ -1,140 +1,50 @@
 # Vision Guard
 
-Vision Guard is a scan-first CCTV video search application with a Gradio UI. It scans a video once, stores frame and segment embeddings, and then answers natural-language queries by combining detector metadata, SigLIP2 retrieval, dense frame reselection, Qwen visual verification, and optional SAM2 segmentation during export.
+Vision Guard is a local, single-process CCTV video search app. It scans a video once, indexes sampled frame and segment embeddings, and lets you search for object-focused events such as `person`, `white car`, `umbrella`, or `backpack`.
 
-This repository is intentionally a single-process inference application. There is no training loop, database server, REST API, or external orchestration service in the tracked runtime code.
+The main local UI is now a Flask app with Jinja templates, static CSS, and vanilla JavaScript. The legacy Gradio app remains in `app.py`, but it is no longer the documented main entry point.
 
-## Pipeline Overview
+## Local Setup
 
-![Vision Guard AI: CCTV Search and Analysis Pipeline](CCTV_Search_and_Analysis_Pipeline.png)
-
-## Documentation
-
-- Full technical manual: [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md)
-- Optional external context-compression notes: [optional_integrations/headroom/README.md](optional_integrations/headroom/README.md)
-- Colab launcher notebook: [VisionGuard_Colab.ipynb](VisionGuard_Colab.ipynb)
-
-## Audit Status
-
-The repository was re-audited against the current codebase state.
-
-- Tracked source/runtime files: preserved
-- Sample assets: preserved
-- Optional documentation scaffolds: preserved
-- Additional definitively unused files found in the tracked repo: none
-- Additional deletions executed in this pass: none
-
-Local environment and runtime infrastructure observed during audit and intentionally preserved:
-
-- `.venv/`
-- `.yolo/`
-- `output/`
-- `yolo11m.pt`
-
-## System Overview
-
-```mermaid
-flowchart TD
-    UI["Gradio UI<br/>app.py"] --> PIPE["VisionGuardPipeline<br/>pipeline.py"]
-    PIPE --> VR["DecordVideoReader<br/>video_reader.py"]
-    PIPE --> DET["ObjectTracker<br/>tracker.py"]
-    PIPE --> ENC["SearchEncoder (SigLIP2)<br/>vlm.py"]
-    PIPE --> FIDX["Frame Index<br/>SegmentVectorIndex"]
-    PIPE --> SIDX["Segment Index<br/>SegmentVectorIndex"]
-    PIPE --> VER["QwenFrameVerifier<br/>qwen_verifier.py"]
-    PIPE --> SEG["GroundedSegmenter (SAM2)<br/>segmenter.py"]
-    PIPE --> CLIP["ClipGenerator<br/>clip_generator.py"]
-    PIPE --> REP["ReportGenerator<br/>report_generator.py"]
-    UI --> WARM["Background Warmup Thread"]
-    WARM --> PIPE
+```powershell
+cd "D:\CDAC PROJECT\visionguard-ai"
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## End-to-End Flow
+## Run The Flask App
 
-```mermaid
-flowchart LR
-    A["Video Input"] --> B["Sample Frames"]
-    B --> C["Motion / Duplicate Filter"]
-    C --> D["YOLO Batch Detection"]
-    D --> E["Frame Metadata + JPEG Writes"]
-    E --> F["SigLIP2 Frame Embeddings"]
-    F --> G["Frame Index"]
-    F --> H["Segment Aggregation + Segment Index"]
-    I["User Query"] --> J["SigLIP2 Text Embedding"]
-    J --> K["Detector / Frame / Segment Candidate Retrieval"]
-    K --> L["Dense Frame Reselection"]
-    L --> M["Qwen Verification + Grounding"]
-    M --> N["Prepared Hits"]
-    N --> O["Optional Segmentation + Clip Export"]
+```powershell
+.\.venv\Scripts\python.exe flask_app.py
 ```
 
-## Quick Start
-
-### Local
-
-```bash
-pip install -r requirements.txt
-python app.py
-```
+Generic Python environments can run the same entry point with `python flask_app.py`.
 
 Open `http://127.0.0.1:7860`.
 
-### Colab
+The Flask routes are:
 
-Use [VisionGuard_Colab.ipynb](VisionGuard_Colab.ipynb). The intended notebook flow is:
+- `GET /`
+- `GET /api/status`
+- `GET /api/assets`
+- `POST /api/scan`
+- `POST /api/query`
+- `POST /api/export`
+- `GET /api/download/<id>`
 
-1. Clone or refresh the repo in `/content/visionguard-ai`
-2. Mount Google Drive
-3. Optionally load `HF_TOKEN` from Colab secrets
-4. Configure persistent cache directories under `/content/drive/MyDrive/visionguard_cache`
-5. Install `requirements.txt`
-6. Set:
-   - `VISION_GUARD_HOST=0.0.0.0`
-   - `GRADIO_SHARE=1`
-7. Run `python -u app.py`
-8. Open the printed `gradio.live` URL
+## Local Workflow
 
-## Current Feature Set
+1. Start the Flask app.
+2. Choose a sample video or upload an MP4.
+3. Click `Scan video`.
+4. Enter an object-focused query.
+5. Review result timestamps, windows, objects, scores, and verification status.
+6. Select matches and click `Export selected`.
+7. Download generated ZIP, HTML, CSV, or JSON files if export succeeds.
 
-- Scan-first indexing with live preview during sampling
-- Frame-level and segment-level retrieval
-- Detector-first exact-object retrieval for supported classes
-- Query normalization and limited synonym handling
-- Object count aggregation shown after scan completion
-- Faster scan path through larger image batches, mixed precision, and overlapped JPEG writes
-- Faster query verification through reduced Qwen token budgets, active result caching, and parallel top-hit verification
-- Export of selected clips, segmented clips, HTML, CSV, JSON, and ZIP packages
+## Sample Assets
 
-## Tracked Repository Layout
-
-### Runtime code
-
-- `app.py`
-- `pipeline.py`
-- `cache_utils.py`
-- `clip_generator.py`
-- `qwen_verifier.py`
-- `report_generator.py`
-- `segmenter.py`
-- `tracker.py`
-- `vector_index.py`
-- `video_reader.py`
-- `vlm.py`
-
-### Configuration and dependency files
-
-- `.gitignore`
-- `requirements.txt`
-
-### User and technical documentation
-
-- `README.md`
-- `PROJECT_DOCUMENTATION.md`
-- `VisionGuard_Colab.ipynb`
-- `optional_integrations/headroom/README.md`
-- `optional_integrations/headroom/VISION_GUARD_CONTEXT.md`
-
-### Sample assets
+The tracked sample videos are:
 
 - `assets/asset1.mp4`
 - `assets/asset2.mp4`
@@ -142,26 +52,53 @@ Use [VisionGuard_Colab.ipynb](VisionGuard_Colab.ipynb). The intended notebook fl
 - `assets/asset4.mp4`
 - `assets/asset5.mp4`
 - `assets/asset6.mp4`
+- `assets/asset7.mp4`
+- `assets/asset8.mp4`
+
+## Verification Honesty
+
+Vision Guard uses Qwen visual verification only when the Qwen backend actually loads and runs. On Windows CPU, `qwen_verifier.py` uses a development passthrough because Qwen is skipped. The Flask UI labels that mode as:
+
+`Detector-only dev passthrough: Qwen skipped on Windows CPU`
+
+Those results are detector/retrieval matches, not real Qwen-verified matches.
+
+## Export Behavior
+
+Export first tries the existing segmentation path. If SAM2 segmentation is unavailable, fails, or times out, the backend creates an honest raw-clip fallback when it can. The UI and API label this as:
+
+`Raw clip export fallback; segmentation unavailable or timed out.`
+
+The app must not silently pretend segmentation worked.
 
 ## Runtime Stack
 
-- UI: Gradio
+- UI: Flask, Jinja, static CSS, vanilla JavaScript
+- Legacy UI: Gradio in `app.py`
 - Video access: Decord with OpenCV fallback
-- Detection-first wrapper: Ultralytics YOLO; tracking support exists in `tracker.py` via BoT-SORT config, but the main scan/index path currently uses batched detection rather than persisted track IDs
-- Image/text retrieval model: `google/siglip2-so400m-patch14-384`
-- Visual verification and grounding: `Qwen/Qwen2.5-VL-7B-Instruct-AWQ`
-- Segmentation: `facebook/sam2.1-hiera-small`
-- Vector search backend: turbovec `IdMapIndex` with NumPy fallback
-- Reporting: JSON, CSV, HTML, ZIP
+- Detection: Ultralytics YOLO, default `yolo11m.pt`
+- Retrieval: `google/siglip2-so400m-patch14-384`
+- Visual verification: `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` when available
+- Segmentation: `facebook/sam2.1-hiera-small` during export when available
+- Reports: JSON, CSV, HTML, ZIP under `output/`
 
-## Query Semantics
+## Tests
 
-The current pipeline is object-focused.
+```powershell
+.\.venv\Scripts\python.exe -m pip check
+.\.venv\Scripts\python.exe -m compileall .
+.\.venv\Scripts\python.exe -m pytest -q
+```
 
-- Supported detector-style queries such as `person`, `white car`, `yellow car`, `truck`, `umbrella`, and `backpack` can use detector metadata directly.
-- Event-style queries such as `fight`, `accident`, `collision`, `crowd`, `fall`, and `loitering` are intentionally rejected before retrieval.
-- Unsupported simple exact-object labels are also rejected conservatively rather than loosely substituted.
-- Trusted detector/object-fallback hits may still be returned when verifier confirmation is absent, but only for supported object-style queries.
+## Visual QA
+
+Start the Flask app first, then run:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\visual_qa.py
+```
+
+Screenshots are written under `qa_screenshots/`. The script requires Playwright and a browser available in the local environment.
 
 ## Outputs
 
@@ -172,21 +109,18 @@ Each scan creates a timestamped run directory under `output/` containing:
 - `reports/`
 - `segments/`
 
-The scan report metadata now includes:
+Uploads are stored under `output/uploads/`.
 
-- `video`
-- `fps`
-- `frames`
-- `duration`
-- `sample_sec`
-- `win_sec`
-- `segments`
-- `object_counts`
-- `total_detections`
-- `unique_objects`
+## Troubleshooting
 
-`object_counts` and `total_detections` are derived from per-frame object-label presence in indexed frames. In other words, they count how many indexed frames contained each label, not the total number of raw detector boxes across the whole video.
+- If dependency install cannot reach PyPI, rerun the same pip command with network access.
+- If YOLO or Hugging Face model downloads fail, place the required model files in the expected local cache or run with network access.
+- If `/api/query` says to scan first, run `/api/scan` or use the UI scan button before searching.
+- If export returns raw fallback, segmentation did not complete in the bounded export window.
+- If Windows CPU shows detector-only dev passthrough, Qwen did not run.
 
-## Read Next
+## Documentation
 
-For the full architecture, file-by-file audit, data contracts, Mermaid diagrams, and operational caveats, continue to [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md).
+- Full technical manual: `PROJECT_DOCUMENTATION.md`
+- Pipeline code explanation: `PIPELINE_CODE_EXPLANATION.md`
+- Colab launcher notebook: `VisionGuard_Colab.ipynb`

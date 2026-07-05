@@ -5,3 +5,4 @@ output/
 yolo11n.pt
 yolo11m.pt
 .venv
+qa_screenshots/

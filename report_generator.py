@@ -102,8 +102,13 @@ class ReportGenerator:
         return path
 
     def write_zip(self, path, files):
+        seen = set()
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
             for file in files:
                 if file and os.path.exists(file):
+                    src = os.path.abspath(file)
+                    if src in seen:
+                        continue
+                    seen.add(src)
                     z.write(file, os.path.basename(file))
         return path
