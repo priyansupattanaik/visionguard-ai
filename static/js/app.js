@@ -118,7 +118,7 @@ els.scanForm.addEventListener("submit", async (event) => {
   }
 });
 
-els.queryButton.addEventListener("click", async () => {
+async function runQuery() {
   const query = els.queryInput.value.trim();
   state.query = query;
   setMessage(els.queryStatus, "Searching...");
@@ -134,9 +134,9 @@ els.queryButton.addEventListener("click", async () => {
   } catch (err) {
     setMessage(els.queryStatus, err.message, "error");
   }
-});
+}
 
-els.exportButton.addEventListener("click", async () => {
+async function runExport() {
   const selected = [...els.resultsList.querySelectorAll("input[type='checkbox']:checked")]
     .map((input) => input.value);
   setMessage(els.exportStatus, "Export started...");
@@ -158,7 +158,10 @@ els.exportButton.addEventListener("click", async () => {
   } catch (err) {
     setMessage(els.exportStatus, err.message, "error");
   }
-});
+}
+
+window.visionGuardFind = runQuery;
+window.visionGuardExport = runExport;
 
 loadAssets().catch((err) => setMessage(els.scanStatus, err.message, "error"));
 loadStatus();

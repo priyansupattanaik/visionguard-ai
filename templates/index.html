@@ -33,7 +33,7 @@
         <label for="queryInput">Query</label>
         <div class="search-row">
           <input id="queryInput" type="text" placeholder="person, white car, umbrella, backpack">
-          <button id="queryButton" type="button">Find matches</button>
+          <button id="queryButton" type="button" onclick="window.visionGuardFind && window.visionGuardFind()">Find matches</button>
         </div>
         <div id="verificationStatus" class="verification">Verification status will appear after scanning.</div>
         <div id="queryStatus" class="message"></div>
@@ -43,7 +43,7 @@
     <section class="panel results-panel">
       <div class="results-head">
         <h2>Results</h2>
-        <button id="exportButton" type="button">Export selected</button>
+        <button id="exportButton" type="button" onclick="window.visionGuardExport && window.visionGuardExport()">Export selected</button>
       </div>
       <div id="resultsList" class="results-list empty">No matches yet.</div>
       <div id="exportStatus" class="message"></div>
