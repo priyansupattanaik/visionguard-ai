@@ -3,7 +3,9 @@ __pycache__/
 .yolo/
 output/
 yolo11n.pt
+yolo11s.pt
 yolo11m.pt
+*.pt
 .venv/
 qa_screenshots/
 .pytest_cache/
@@ -11,5 +13,8 @@ qa_screenshots/
 *.pyc
 *.pyo
 *.tvim
+*.log
 .agents/
 .env
+.DS_Store
+Thumbs.db

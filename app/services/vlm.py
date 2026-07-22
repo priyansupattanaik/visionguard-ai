@@ -7,6 +7,20 @@ from PIL import Image
 from app.utils.cache import resolve_device
 
 
+def _normalize_embedding(vec):
+    """Force an embedding tensor/array to a 1D float32 unit vector of shape (D,)."""
+    arr = np.asarray(vec, dtype=np.float32)
+    arr = np.squeeze(arr)
+    if arr.ndim == 0:
+        return np.zeros((1,), dtype=np.float32)
+    if arr.ndim > 1:
+        arr = arr.reshape(-1)
+    n = float(np.linalg.norm(arr))
+    if n == 0.0:
+        return arr.astype(np.float32, copy=False)
+    return (arr / n).astype(np.float32)
+
+
 class SearchEncoder:
     def __init__(self, model="google/siglip2-so400m-patch14-384", device=None):
         self.model_name = os.getenv("CLIP_MODEL") or model
@@ -55,11 +69,11 @@ class SearchEncoder:
         return x
 
     def _norm(self, x):
-        x = self._vec(x).detach().cpu().numpy()[0]
-        n = np.linalg.norm(x)
-        if n == 0:
-            return x.astype(np.float32)
-        return (x / n).astype(np.float32)
+        raw = self._vec(x).detach().cpu().numpy()
+        # Handle (1, D) or (D,) outputs from single-item inference.
+        if raw.ndim >= 2:
+            raw = raw[0]
+        return _normalize_embedding(raw)
 
     def embed_text(self, txt):
         self.load()
@@ -92,10 +106,13 @@ class SearchEncoder:
             else:
                 with torch.no_grad():
                     vecs = self._vec(self.m.get_image_features(**inp)).detach().cpu().numpy()
+            vecs = np.asarray(vecs)
+            # Guarantee batch axis even if model returns a single (D,) vector.
+            if vecs.ndim == 1:
+                vecs = vecs.reshape(1, -1)
+            elif vecs.ndim > 2:
+                # e.g. (B, 1, D) -> (B, D)
+                vecs = np.reshape(vecs, (vecs.shape[0], -1))
             for vec in vecs:
-                n = np.linalg.norm(vec)
-                if n == 0:
-                    out.append(vec.astype(np.float32))
-                else:
-                    out.append((vec / n).astype(np.float32))
+                out.append(_normalize_embedding(vec))
         return out

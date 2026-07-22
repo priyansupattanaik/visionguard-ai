@@ -15,11 +15,16 @@ from app.services.nvidia_verifier import NvidiaFrameVerifier
 from app.services.report_generator import ReportGenerator
 from app.services.segmenter import GroundedSegmenter
 from app.services.tracker import ObjectTracker
-from app.pipeline.vector_index import SegmentVectorIndex
+from app.pipeline.vector_index import SegmentVectorIndex, _as_2d_float32
 from app.pipeline.video_reader import DecordVideoReader
 from app.services.vlm import SearchEncoder
 
 setup_cache()
+
+
+def _stack_embeddings(vectors):
+    """Stack 1D embeddings into a contiguous 2D float32 array (N, D)."""
+    return _as_2d_float32(vectors)
 
 
 class VisionGuardPipeline:
@@ -516,9 +521,60 @@ class VisionGuardPipeline:
                 hits[i]["summary"] = f"detector-matched sampled frame at {best_ts:.2f}s | detected: {', '.join(labels)}"
         return hits
 
+    def _mark_unverified(self, rows, mode=None):
+        mode = mode or self.verification_mode()
+        for row in rows:
+            row["verified_match"] = False
+            row["verify_score"] = 0.0
+            row["verified_caption"] = ""
+            row["grounded"] = False
+            row["verification_mode"] = mode
+            row["low_confidence"] = True
+            if not row.get("summary"):
+                row["summary"] = f"detector/retrieval candidate (verification: {mode})"
+        return rows
+
+    def _apply_verify_result(self, row, result, query):
+        boxes = result.get("boxes", [])
+        caption = result.get("caption", "")
+        matched = bool(result.get("matched"))
+        confidence = float(result.get("confidence", 0.0) or 0.0)
+        verification_mode = result.get("verification_mode") or self.verification_mode()
+        row["det_boxes"] = boxes or row.get("det_boxes", [])
+        row["verified_caption"] = caption
+        row["grounded"] = bool(boxes)
+        row["verified_match"] = matched
+        row["verify_score"] = confidence
+        row["verification_mode"] = verification_mode
+        if matched:
+            row["score"] = float(row["score"] + min(0.35, 0.16 + 0.18 * confidence))
+            label = ", ".join(row.get("objects", [])) or query
+            detail = caption or f"visible match for {query}"
+            if verification_mode == "nvidia_api":
+                row["summary"] = f"NVIDIA API-verified query match at {row.get('peak_ts', row['start']):.2f}s | {detail} | detected: {label}"
+            else:
+                row["summary"] = f"unconfirmed query match at {row.get('peak_ts', row['start']):.2f}s | {detail} | detected: {label}"
+        elif caption:
+            row["score"] = float(row["score"] * 0.6)
+            row["low_confidence"] = True
+            row["summary"] = f"unverified visual candidate at {row.get('peak_ts', row['start']):.2f}s | {caption}"
+        else:
+            row["score"] = float(row["score"] * 0.5)
+            row["low_confidence"] = True
+            if verification_mode in {"nvidia_api_unconfigured", "nvidia_api_unavailable", "unknown"}:
+                row["summary"] = (
+                    f"detector/retrieval candidate at {row.get('peak_ts', row['start']):.2f}s "
+                    f"(verification unavailable: {verification_mode})"
+                )
+        return row
+
     def _verify_rows(self, rows, query, top_n=1):
         if not rows:
             return rows
+        mode = self.verification_mode()
+        if mode == "nvidia_api_unconfigured" or not getattr(self.ver, "api_key", None):
+            self._mark_unverified(rows, mode="nvidia_api_unconfigured")
+            return sorted(rows, key=lambda x: x["score"], reverse=True)
         take = min(top_n, len(rows))
         futures = {
             self.pool.submit(
@@ -534,39 +590,37 @@ class VisionGuardPipeline:
             try:
                 results[idx] = future.result(timeout=30)
             except Exception:
-                results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": [], "verification_mode": self.verification_mode()}
+                results[idx] = {
+                    "matched": False,
+                    "confidence": 0.0,
+                    "caption": "",
+                    "boxes": [],
+                    "verification_mode": "nvidia_api_unavailable",
+                }
         for i, result in enumerate(results):
-            boxes = result.get("boxes", [])
-            caption = result.get("caption", "")
-            matched = bool(result.get("matched"))
-            confidence = float(result.get("confidence", 0.0) or 0.0)
-            verification_mode = result.get("verification_mode") or self.verification_mode()
-            rows[i]["det_boxes"] = boxes or rows[i].get("det_boxes", [])
-            rows[i]["verified_caption"] = caption
-            rows[i]["grounded"] = bool(boxes)
-            rows[i]["verified_match"] = matched
-            rows[i]["verify_score"] = confidence
-            rows[i]["verification_mode"] = verification_mode
-            if matched:
-                rows[i]["score"] = float(rows[i]["score"] + min(0.35, 0.16 + 0.18 * confidence))
-                label = ", ".join(rows[i].get("objects", [])) or query
-                detail = caption or f"visible match for {query}"
-                if verification_mode == "nvidia_api":
-                    rows[i]["summary"] = f"NVIDIA API-verified query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
-                else:
-                    rows[i]["summary"] = f"unconfirmed query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
-            elif caption:
-                rows[i]["score"] = float(rows[i]["score"] * 0.6)
-                rows[i]["low_confidence"] = True
-                rows[i]["summary"] = f"unverified visual candidate at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {caption}"
-            else:
-                rows[i]["score"] = float(rows[i]["score"] * 0.5)
-                rows[i]["low_confidence"] = True
+            if result is None:
+                result = {
+                    "matched": False,
+                    "confidence": 0.0,
+                    "caption": "",
+                    "boxes": [],
+                    "verification_mode": self.verification_mode(),
+                }
+            self._apply_verify_result(rows[i], result, query)
+        for j in range(take, len(rows)):
+            rows[j]["verification_mode"] = rows[j].get("verification_mode") or self.verification_mode()
+            rows[j]["low_confidence"] = True
         rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         return rows
 
     def _verify_rows_stream(self, rows, query, top_n=1):
         if not rows:
+            return
+        mode = self.verification_mode()
+        if mode == "nvidia_api_unconfigured" or not getattr(self.ver, "api_key", None):
+            self._mark_unverified(rows, mode="nvidia_api_unconfigured")
+            for i, row in enumerate(rows[:top_n]):
+                yield i, row
             return
         take = min(top_n, len(rows))
         futures = {
@@ -583,34 +637,23 @@ class VisionGuardPipeline:
             try:
                 results[idx] = future.result(timeout=30)
             except Exception:
-                results[idx] = {"matched": False, "confidence": 0.0, "caption": "", "boxes": [], "verification_mode": self.verification_mode()}
+                results[idx] = {
+                    "matched": False,
+                    "confidence": 0.0,
+                    "caption": "",
+                    "boxes": [],
+                    "verification_mode": "nvidia_api_unavailable",
+                }
         for i, result in enumerate(results):
-            boxes = result.get("boxes", [])
-            caption = result.get("caption", "")
-            matched = bool(result.get("matched"))
-            confidence = float(result.get("confidence", 0.0) or 0.0)
-            verification_mode = result.get("verification_mode") or self.verification_mode()
-            rows[i]["det_boxes"] = boxes or rows[i].get("det_boxes", [])
-            rows[i]["verified_caption"] = caption
-            rows[i]["grounded"] = bool(boxes)
-            rows[i]["verified_match"] = matched
-            rows[i]["verify_score"] = confidence
-            rows[i]["verification_mode"] = verification_mode
-            if matched:
-                rows[i]["score"] = float(rows[i]["score"] + min(0.35, 0.16 + 0.18 * confidence))
-                label = ", ".join(rows[i].get("objects", [])) or query
-                detail = caption or f"visible match for {query}"
-                if verification_mode == "nvidia_api":
-                    rows[i]["summary"] = f"NVIDIA API-verified query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
-                else:
-                    rows[i]["summary"] = f"unconfirmed query match at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {detail} | detected: {label}"
-            elif caption:
-                rows[i]["score"] = float(rows[i]["score"] * 0.6)
-                rows[i]["low_confidence"] = True
-                rows[i]["summary"] = f"unverified visual candidate at {rows[i].get('peak_ts', rows[i]['start']):.2f}s | {caption}"
-            else:
-                rows[i]["score"] = float(rows[i]["score"] * 0.5)
-                rows[i]["low_confidence"] = True
+            if result is None:
+                result = {
+                    "matched": False,
+                    "confidence": 0.0,
+                    "caption": "",
+                    "boxes": [],
+                    "verification_mode": self.verification_mode(),
+                }
+            self._apply_verify_result(rows[i], result, query)
             yield i, rows[i]
 
     def _confirmed_rows(self, rows):
@@ -728,10 +771,10 @@ class VisionGuardPipeline:
 
     def index_video_iter(self, video, sample_sec=None, win_sec=None):
         if sample_sec is None:
-            sample_sec = float(os.getenv("SAMPLE_SEC", "0.75"))
+            sample_sec = float(os.getenv("SAMPLE_SEC", "1.5"))
         if win_sec is None:
             win_sec = float(os.getenv("WIN_SEC", "4.5"))
-        enable_crop_embeddings = os.getenv("ENABLE_CROP_EMBEDDINGS", "1").strip().lower() not in {"0", "false", "no", "off"}
+        enable_crop_embeddings = os.getenv("ENABLE_CROP_EMBEDDINGS", "0").strip().lower() not in {"0", "false", "no", "off"}
         self._new_run(video)
         self.trk.reset()
         vr = DecordVideoReader(video)
@@ -743,7 +786,8 @@ class VisionGuardPipeline:
         step = max(1, int(round(sample_sec * fps)))
         frames = []
         pending = []
-        batch_size = 8
+        # Align decode batch with embedding batch; keep a small floor for IO efficiency.
+        batch_size = max(4, min(16, int(self.enc.image_batch_size)))
         frame_vec_chunks = []
         frame_id_chunks = []
         crop_vec_chunks = []
@@ -755,9 +799,24 @@ class VisionGuardPipeline:
         last_keep_ts = None
         last_kept_objects = set()
         t0 = time.perf_counter()
-        timings = {"frame_read_filter": 0.0, "detection_tracking": 0.0, "frame_embeddings": 0.0, "crop_embeddings": 0.0, "index_building": 0.0}
+        timings = {
+            "frame_read_filter": 0.0,
+            "detection_tracking": 0.0,
+            "frame_embeddings": 0.0,
+            "crop_embeddings": 0.0,
+            "index_building": 0.0,
+        }
         processed_samples = 0
+        kept_frames = 0
+        skipped_static = 0
+        skipped_empty = 0
         total_samples = max(1, len(sample_indices := list(range(0, total, step))))
+        print(
+            f"[Scan] start video={os.path.basename(video)} sample_sec={sample_sec} "
+            f"win_sec={win_sec} step={step} device={self.enc.dev} "
+            f"yolo={self.trk.model_name} image_batch={self.enc.image_batch_size} "
+            f"crop_embeddings={'on' if enable_crop_embeddings else 'off'}"
+        )
 
         def flush_pending():
             nonlocal frames, pending, frame_vec_chunks, frame_id_chunks, crop_vec_chunks, crop_id_chunks, crop_meta_list
@@ -787,9 +846,9 @@ class VisionGuardPipeline:
                 chunk_vecs.append(emb)
                 chunk_ids.append(frame_id)
             if chunk_vecs:
-                frame_vec_chunks.append(np.ascontiguousarray(np.stack(chunk_vecs).astype(np.float32)))
+                frame_vec_chunks.append(_stack_embeddings(chunk_vecs))
                 frame_id_chunks.append(np.asarray(chunk_ids, dtype=np.uint64))
-            
+
             # Crop embeddings are optional because each detection adds another
             # expensive SigLIP inference workload.
             if not enable_crop_embeddings:
@@ -818,9 +877,7 @@ class VisionGuardPipeline:
             if crops:
                 # Batch embed crops in chunks to avoid OOM
                 crop_embedding_started = time.perf_counter()
-                c_embs = []
-                for i in range(0, len(crops), self.enc.image_batch_size):
-                    c_embs.extend(self.enc.embed_frames(crops[i:i + self.enc.image_batch_size]))
+                c_embs = self.enc.embed_frames(crops)
                 timings["crop_embeddings"] += time.perf_counter() - crop_embedding_started
                 batch_crop_vecs = []
                 batch_crop_ids = []
@@ -830,7 +887,7 @@ class VisionGuardPipeline:
                     batch_crop_ids.append(cid)
                     crop_meta_list.append(info)
                 if batch_crop_vecs:
-                    crop_vec_chunks.append(np.ascontiguousarray(np.stack(batch_crop_vecs).astype(np.float32)))
+                    crop_vec_chunks.append(_stack_embeddings(batch_crop_vecs))
                     crop_id_chunks.append(np.asarray(batch_crop_ids, dtype=np.uint64))
 
             pending = []
@@ -851,10 +908,12 @@ class VisionGuardPipeline:
                 prev_sig = sig
                 if keep:
                     interesting.append((i, frame, ts, motion_score, keep_reason))
+                else:
+                    skipped_static += 1
             timings["frame_read_filter"] += time.perf_counter() - read_filter_started
             if not interesting:
                 continue
-            # Use sequential tracking instead of batch detection
+            # Sequential tracking preserves BoT-SORT state across frames.
             for (i, frame, ts, motion_score, keep_reason) in interesting:
                 if frame is None:
                     continue
@@ -870,6 +929,7 @@ class VisionGuardPipeline:
                     track_ids = [det["id"] for det in tracked_dets if "id" in det]
                 timings["detection_tracking"] += time.perf_counter() - detection_started
                 if self._is_non_content_frame(frame, detections):
+                    skipped_empty += 1
                     continue
                 objs = {}
                 det_rows = []
@@ -908,6 +968,7 @@ class VisionGuardPipeline:
                     "frame_path": frame_path,
                     "meta": meta,
                 })
+                kept_frames += 1
                 last_kept_objects = set(objs.keys())
                 last_keep_ts = ts
                 elapsed = max(1e-6, time.perf_counter() - t0)
@@ -915,7 +976,11 @@ class VisionGuardPipeline:
                 remain = max(0, total_samples - processed_samples)
                 eta = remain / sample_rate if sample_rate > 0 else 0.0
                 pct = min(100.0, 100.0 * processed_samples / total_samples)
-                status = f"scanning {ts:.1f}s / {dur:.1f}s | {pct:.0f}% | eta {eta:.1f}s"
+                status = (
+                    f"scanning {ts:.1f}s / {dur:.1f}s | {pct:.0f}% | eta {eta:.1f}s | "
+                    f"kept {kept_frames} | det {timings['detection_tracking']:.0f}s | "
+                    f"emb {timings['frame_embeddings']:.0f}s"
+                )
                 yield {"kind": "preview", "image": self._preview(frame, det_rows, ts), "status": status}
                 if len(pending) >= self.enc.image_batch_size:
                     flush_pending()
@@ -933,8 +998,9 @@ class VisionGuardPipeline:
             lo = (j // block) * block
             hi = min(len(frames), lo + block)
             chunk = frames[lo:hi]
-            emb = np.mean([x["emb"] for x in chunk], axis=0).astype(np.float32)
-            emb = emb / max(np.linalg.norm(emb), 1e-6)
+            emb = np.mean([np.asarray(x["emb"], dtype=np.float32).reshape(-1) for x in chunk], axis=0).astype(np.float32)
+            emb = emb / max(float(np.linalg.norm(emb)), 1e-6)
+            emb = emb.astype(np.float32)
             objs = {}
             tids = set()
             motion_scores = []
@@ -971,7 +1037,7 @@ class VisionGuardPipeline:
             seg_chunk_vecs.append(emb)
             seg_chunk_ids.append(np.uint64(len(segs) - 1))
         if seg_chunk_vecs:
-            seg_vec_chunks.append(np.ascontiguousarray(np.stack(seg_chunk_vecs).astype(np.float32)))
+            seg_vec_chunks.append(_stack_embeddings(seg_chunk_vecs))
             seg_id_chunks.append(np.asarray(seg_chunk_ids, dtype=np.uint64))
         meta = {
             "video": video,
@@ -981,6 +1047,11 @@ class VisionGuardPipeline:
             "sample_sec": sample_sec,
             "win_sec": win_sec,
             "segments": len(segs),
+            "kept_frames": kept_frames,
+            "skipped_static_frames": skipped_static,
+            "skipped_empty_frames": skipped_empty,
+            "enable_crop_embeddings": enable_crop_embeddings,
+            "device": self.enc.dev,
             "track_stats": {int(k): {k2: v2 for k2, v2 in v.items() if k2 != "boxes"} for k, v in track_stats.items()},
         }
         self.idx = {
@@ -1072,23 +1143,26 @@ class VisionGuardPipeline:
         # Generate zero-query analysis
         self._generate_zero_query(track_stats, fps, dur)
         total_elapsed = time.perf_counter() - t0
-        print(f"[Scan] Frame reading + filtering took {timings['frame_read_filter']:.1f}s")
-        print(f"[Scan] Detection + Tracking took {timings['detection_tracking']:.1f}s")
-        print(f"[Scan] Frame embeddings took {timings['frame_embeddings']:.1f}s")
+        timings["total"] = total_elapsed
+        self.idx["meta"]["scan_timings"] = {k: round(v, 3) for k, v in timings.items()}
+        print(f"[Scan] Detection: {timings['detection_tracking']:.1f}s")
+        print(f"[Scan] Frame Embedding: {timings['frame_embeddings']:.1f}s")
         if enable_crop_embeddings:
-            print(f"[Scan] Crop embeddings took {timings['crop_embeddings']:.1f}s")
+            print(f"[Scan] Crop Embedding: {timings['crop_embeddings']:.1f}s")
         else:
-            print("[Scan] Crop embeddings skipped (ENABLE_CROP_EMBEDDINGS=0)")
-        print(f"[Scan] Index building took {timings['index_building']:.1f}s")
-        print(f"[Scan] Total indexing time: {total_elapsed:.1f}s")
+            print("[Scan] Crop Embedding: skipped (ENABLE_CROP_EMBEDDINGS=0)")
+        print(f"[Scan] Frame read/filter: {timings['frame_read_filter']:.1f}s | kept={kept_frames} static_skip={skipped_static} empty_skip={skipped_empty}")
+        print(f"[Scan] Index building: {timings['index_building']:.1f}s")
+        print(f"[Scan] Total time: {total_elapsed:.1f}s")
         yield {
             "kind": "done",
-                "meta": {
-                    **self.idx["meta"],
-                    "retriever": self.frame_idx.backend,
-                    "segment_retriever": self.search_idx.backend,
-                    "verifier": self.ver.model_name,
-                },
+            "meta": {
+                **self.idx["meta"],
+                "retriever": self.frame_idx.backend,
+                "segment_retriever": self.search_idx.backend,
+                "verifier": self.ver.model_name,
+                "scan_timings": {k: round(v, 3) for k, v in timings.items()},
+            },
             "index_json": path,
         }
 
@@ -1199,10 +1273,15 @@ class VisionGuardPipeline:
 
     def verification_mode(self):
         if hasattr(self.ver, "verification_mode"):
-            return self.ver.verification_mode()
+            try:
+                return self.ver.verification_mode()
+            except Exception:
+                return "unknown"
         backend = getattr(self.ver, "backend", "none")
         if backend == "nvidia_api":
             return "nvidia_api"
+        if backend in {"unconfigured", "unavailable"}:
+            return "nvidia_api_unconfigured" if backend == "unconfigured" else "nvidia_api_unavailable"
         return "unknown"
 
     def _temporal_track_hits(self, raw_q, q, qv, top_k):

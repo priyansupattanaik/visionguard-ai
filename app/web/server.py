@@ -35,12 +35,16 @@ def _verification_label(mode):
         return "NVIDIA API visual verification"
     if mode == "nvidia_api_unconfigured":
         return "NVIDIA API key is not configured"
+    if mode == "nvidia_api_unavailable":
+        return "NVIDIA API verification temporarily unavailable"
     return "Verification unavailable"
 
 
 def _verification_warning(mode):
     if mode == "nvidia_api_unconfigured":
         return "Add NVIDIA_API_KEY to .env to enable visual verification. Results are detector/retrieval matches only."
+    if mode == "nvidia_api_unavailable":
+        return "NVIDIA verification API did not respond successfully. Showing detector/retrieval matches only."
     if mode == "unknown":
         return "Verification backend is not ready or unavailable."
     return ""
