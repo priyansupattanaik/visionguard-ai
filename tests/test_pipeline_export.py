@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from pipeline import VisionGuardPipeline
+from app.pipeline.video_pipeline import VisionGuardPipeline
 
 
 class FakeClip:
@@ -25,7 +25,7 @@ def test_export_falls_back_to_raw_clip_when_segmentation_fails(tmp_path):
     (run_dir / "segments").mkdir(parents=True)
     pipe.run_dir = str(run_dir)
     pipe.clip = FakeClip(run_dir / "clips")
-    from report_generator import ReportGenerator
+    from app.services.report_generator import ReportGenerator
 
     pipe.rep = ReportGenerator(run_dir / "reports")
     pipe.idx = {"video": "assets/asset3.mp4"}

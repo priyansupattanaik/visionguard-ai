@@ -1,8 +1,17 @@
 # Vision Guard
 
-Vision Guard is a local, single-process CCTV video search app. It scans a video once, indexes sampled frame and segment embeddings, and lets you search for object-focused events such as `person`, `white car`, `umbrella`, or `backpack`.
+Vision Guard is a local, single-process CCTV video search app with **Hierarchical Object-Centric Video RAG (HOC-VideoRAG)** architecture. It scans a video once, runs real multi-object tracking (BoT-SORT), indexes sampled frame, segment, and object-crop embeddings, and lets you search for objects, temporal events, or browse an automatic zero-query analysis.
 
-The main local UI is now a Flask app with Jinja templates, static CSS, and vanilla JavaScript. The legacy Gradio app remains in `app.py`, but it is no longer the documented main entry point.
+The main local UI is a Flask app with Jinja templates, static CSS, and vanilla JavaScript. The legacy Gradio app is preserved in `legacy/app_gradio.py`.
+
+## Features
+
+- **Real Multi-Object Tracking**: BoT-SORT with persistent track IDs, trajectory statistics, dwell time, entry/exit detection.
+- **Object-Crop Embeddings**: High-confidence detections are cropped and embedded via SigLIP2 for fine-grained retrieval.
+- **Zero-Query Mode**: Auto-generated object inventory, event timeline, and anomaly detection after every scan — no query needed.
+- **Controlled Temporal Queries**: Supports "loitering", "entering", "exiting", "approaching", "gathering" via track trajectory features.
+- **Hierarchical Retrieval**: Tracks → segments → frames → dense reselection.
+- **Honest Verification**: Labels clearly whether Qwen VLM actually ran or if results are detector-only.
 
 ## Local Setup
 
@@ -22,38 +31,44 @@ Generic Python environments can run the same entry point with `python flask_app.
 
 Open `http://127.0.0.1:7860`.
 
-The Flask routes are:
+## API Endpoints
 
-- `GET /`
-- `GET /api/status`
-- `GET /api/assets`
-- `POST /api/scan`
-- `POST /api/query`
-- `POST /api/export`
-- `GET /api/download/<id>`
+| Endpoint | Method | Description |
+|---|---|---|
+| `/` | GET | Main UI |
+| `/api/status` | GET | System/model status |
+| `/api/assets` | GET | List sample videos |
+| `/api/scan` | POST | Scan and index a video |
+| `/api/zero_query` | GET | **NEW** — Auto-generated analysis (inventory + timeline) |
+| `/api/query` | POST | Search indexed video |
+| `/api/export` | POST | Export selected matches |
+| `/api/download/<id>` | GET | Download exported file |
 
 ## Local Workflow
 
 1. Start the Flask app.
 2. Choose a sample video or upload an MP4.
 3. Click `Scan video`.
-4. Enter an object-focused query.
-5. Review result timestamps, windows, objects, scores, and verification status.
-6. Select matches and click `Export selected`.
-7. Download generated ZIP, HTML, CSV, or JSON files if export succeeds.
+4. **NEW**: Click `Show Analysis` in the Auto Analysis panel for zero-query insights (object inventory, event timeline).
+5. Enter an object-focused or temporal query (e.g., "person", "white car", "loitering", "person entering").
+6. Review result timestamps, windows, objects, tracks, scores, and verification status.
+7. Select matches and click `Export selected`.
+8. Download generated ZIP, HTML, CSV, or JSON files if export succeeds.
+
+## Tracking & Zero-Query
+
+After scanning, VisionGuard automatically computes:
+- **Object Inventory**: Per-class track counts, dwell times, entry/exit timestamps.
+- **Event Timeline**: High-motion segments, long-dwell anomalies, sudden appearances.
+- **Natural-Language Summary**: Quick overview of the video content.
+
+These are accessible via the UI ("Auto Analysis" panel) or `GET /api/zero_query`.
 
 ## Sample Assets
 
-The tracked sample videos are:
-
-- `assets/asset1.mp4`
-- `assets/asset2.mp4`
-- `assets/asset3.mp4`
-- `assets/asset4.mp4`
-- `assets/asset5.mp4`
-- `assets/asset6.mp4`
-- `assets/asset7.mp4`
-- `assets/asset8.mp4`
+The tracked sample videos are in `assets/`:
+- `asset1.mp4`, `asset2.mp4`, `asset3.mp4`, `asset4.mp4`
+- `asset5.mp4`, `asset6.mp4`, `asset7.mp4`, `asset8.mp4`
 
 ## Verification Honesty
 
@@ -74,40 +89,37 @@ The app must not silently pretend segmentation worked.
 ## Runtime Stack
 
 - UI: Flask, Jinja, static CSS, vanilla JavaScript
-- Legacy UI: Gradio in `app.py`
+- Legacy UI: Gradio in `legacy/app_gradio.py`
 - Video access: Decord with OpenCV fallback
-- Detection: Ultralytics YOLO, default `yolo11m.pt`
-- Retrieval: `google/siglip2-so400m-patch14-384`
+- Detection & Tracking: Ultralytics YOLO11m + BoT-SORT with `persist=True`
+- Retrieval: `google/siglip2-so400m-patch14-384` (frame + crop embeddings)
 - Visual verification: `Qwen/Qwen2.5-VL-7B-Instruct-AWQ` when available
 - Segmentation: `facebook/sam2.1-hiera-small` during export when available
+- Vector index: turbovec (with numpy fallback)
 - Reports: JSON, CSV, HTML, ZIP under `output/`
 
 ## Tests
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip check
 .\.venv\Scripts\python.exe -m compileall .
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-## Visual QA
-
-Start the Flask app first, then run:
-
-```powershell
-.\.venv\Scripts\python.exe scripts\visual_qa.py
-```
-
-Screenshots are written under `qa_screenshots/`. The script requires Playwright and a browser available in the local environment.
+Tests cover:
+- Tracking produces non-empty track_ids
+- Zero-query generates valid inventory + timeline
+- Existing object queries still work
+- Export still produces clips
+- Flask routes and UI integrity
 
 ## Outputs
 
 Each scan creates a timestamped run directory under `output/` containing:
 
-- `frames/`
-- `clips/`
-- `reports/`
-- `segments/`
+- `frames/` — sampled keyframes
+- `clips/` — extracted/segmented clips
+- `reports/` — index.json, zero_query.json, frame/segment/crop indices
+- `segments/` — segmentation masks
 
 Uploads are stored under `output/uploads/`.
 
@@ -122,5 +134,6 @@ Uploads are stored under `output/uploads/`.
 ## Documentation
 
 - Full technical manual: `PROJECT_DOCUMENTATION.md`
-- Pipeline code explanation: `PIPELINE_CODE_EXPLANATION.md`
+- Changelog: `CHANGELOG.md`
+- Legacy Gradio app: `legacy/app_gradio.py`
 - Colab launcher notebook: `VisionGuard_Colab.ipynb`

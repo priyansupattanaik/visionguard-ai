@@ -14,7 +14,7 @@ class DummyPipeline:
         return "Models loading..."
 
     def verification_mode(self):
-        return "detector_only_dev_passthrough"
+        return "nvidia_api_unconfigured"
 
     def export_selected_detailed(self, picks, query, segment_timeout=20):
         return {
@@ -34,7 +34,7 @@ def make_client():
 
 def test_flask_app_imports_without_launching_server():
     app = create_app(testing=True, start_warmup=False, pipeline=DummyPipeline())
-    assert app.name == "flask_app"
+    assert app.name == "app.web.server"
 
 
 def test_index_is_custom_html_without_gradio_markers():
@@ -47,15 +47,14 @@ def test_index_is_custom_html_without_gradio_markers():
     assert "gradio" not in body
 
 
-def test_status_returns_json_and_honest_dev_passthrough_label():
+def test_status_returns_json_and_honest_api_configuration_label():
     client = make_client()
     res = client.get("/api/status")
     data = res.get_json()
     assert res.status_code == 200
     assert data["ok"] is True
-    assert data["verification_mode"] == "detector_only_dev_passthrough"
-    assert data["verification_label"] != "Real Qwen verification"
-    assert "Qwen skipped" in data["verification_label"]
+    assert data["verification_mode"] == "nvidia_api_unconfigured"
+    assert data["verification_label"] == "NVIDIA API key is not configured"
 
 
 def test_assets_include_asset3_when_present():

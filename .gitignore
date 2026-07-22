@@ -4,5 +4,12 @@ __pycache__/
 output/
 yolo11n.pt
 yolo11m.pt
-.venv
+.venv/
 qa_screenshots/
+.pytest_cache/
+.pytest_runtime_tmp/
+*.pyc
+*.pyo
+*.tvim
+.agents/
+.env
