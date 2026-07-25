@@ -16,6 +16,14 @@ class DummyPipeline:
     def verification_mode(self):
         return "nvidia_api_unconfigured"
 
+    def model_health(self, refresh=False):
+        return {
+            "selected_provider": "llama_cpp",
+            "text_model": {"configured": True, "reachable": False, "url": "http://127.0.0.1:8080", "message": "not reachable"},
+            "vision_model": {"configured": True, "reachable": False, "url": "http://127.0.0.1:8081", "message": "not reachable"},
+            "external_providers": {"nvidia": "disabled", "groq": "disabled"},
+        }
+
     def export_selected_detailed(self, picks, query, segment_timeout=20):
         return {
             "ok": False,
@@ -42,7 +50,7 @@ def test_index_is_custom_html_without_gradio_markers():
     res = client.get("/")
     body = res.get_data(as_text=True).lower()
     assert res.status_code == 200
-    assert "vision guard" in body
+    assert "visionguard" in body
     assert "gradio-container" not in body
     assert "gradio" not in body
 
@@ -64,6 +72,17 @@ def test_assets_include_asset3_when_present():
     names = [asset["name"] for asset in data["assets"]]
     assert res.status_code == 200
     assert "asset3.mp4" in names
+
+
+def test_model_health_reports_selected_local_provider_without_blocking_video_backend():
+    client = make_client()
+    res = client.get("/api/model/health")
+    data = res.get_json()
+
+    assert res.status_code == 200
+    assert data["selected_provider"] == "llama_cpp"
+    assert data["text_model"]["reachable"] is False
+    assert data["external_providers"] == {"nvidia": "disabled", "groq": "disabled"}
 
 
 def test_query_before_scan_returns_controlled_error():

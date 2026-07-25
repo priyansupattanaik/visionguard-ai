@@ -8,6 +8,7 @@ from flask import Flask, Response, abort, jsonify, render_template, request, sen
 from werkzeug.utils import secure_filename
 
 from visionguard.runtime.cache import setup_cache
+from visionguard.model_services.model_provider import model_health_snapshot
 from visionguard.runtime.env import load_project_env
 from visionguard.video_pipeline.video_pipeline import VisionGuardPipeline
 from visionguard.web_app.video_jobs import (
@@ -44,16 +45,28 @@ def _asset_rows():
 
 
 def _verification_label(mode):
+    if mode == "llama_cpp_vision":
+        return "Local llama.cpp vision verification"
+    if mode == "llama_cpp_vision_unconfigured":
+        return "Local vision model is not configured"
+    if mode == "llama_cpp_vision_unavailable":
+        return "Local vision model is disconnected"
     if mode == "nvidia_api":
         return "NVIDIA API visual verification"
     if mode == "nvidia_api_unconfigured":
         return "NVIDIA API key is not configured"
     if mode == "nvidia_api_unavailable":
         return "NVIDIA API verification temporarily unavailable"
+    if mode == "verification_disabled":
+        return "Visual verification is disabled"
     return "Verification unavailable"
 
 
 def _verification_warning(mode):
+    if mode == "llama_cpp_vision_unconfigured":
+        return "Local vision verification is not configured. Detector-backed object search remains available."
+    if mode == "llama_cpp_vision_unavailable":
+        return "The local vision endpoint is unreachable. Upload, frame extraction, and detector-backed search remain available."
     if mode == "nvidia_api_unconfigured":
         return "Add NVIDIA_API_KEY to .env to enable visual verification. Results are detector/retrieval matches only."
     if mode == "nvidia_api_unavailable":
@@ -198,8 +211,8 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                     set_job_stage(job, name, "running", total=video["metadata"]["frame_count"])
                 for event in pipe.index_video_iter(video["_path"]):
                     if event.get("kind") == "preview":
-                        processed = int(event.get("frame_number", 0)) + 1
-                        total = int(video["metadata"]["frame_count"])
+                        processed = int(event.get("processed_samples", 0))
+                        total = int(event.get("total_samples", 0))
                         kept = int(event.get("kept_frames", 0))
                         detected = int(event.get("detections", 0))
                         evidence_frame = frame_from_progress_event(video_id, event)
@@ -314,6 +327,10 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                 "verification_mode": mode,
                 "verification_label": _verification_label(mode),
                 "warning": _verification_warning(mode),
+                "warnings": [warning for warning in [
+                    _verification_warning(mode),
+                    *(query_plan.get("limitations", []) if isinstance(query_plan, dict) else []),
+                ] if warning],
             }, 200
 
     @app.get("/")
@@ -396,6 +413,15 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
             "frame_count_indexed": len(video["frames"]),
             "processing": video.get("processing", {}),
         })
+
+    @app.get("/api/model/health")
+    def api_model_health():
+        pipe = app.config["PIPELINE"]
+        if hasattr(pipe, "model_health"):
+            snapshot = pipe.model_health(refresh=True)
+        else:
+            snapshot = model_health_snapshot()
+        return jsonify({"ok": True, **snapshot})
 
     @app.get("/api/videos/<video_id>/content")
     def api_video_content(video_id):

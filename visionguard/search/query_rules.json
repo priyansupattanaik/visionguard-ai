@@ -1,6 +1,6 @@
 {
   "attributes": ["red", "blue", "black", "white", "yellow", "green", "small", "large", "helmet"],
-  "events": ["enter", "entered", "entering", "exit", "exited", "exiting", "leave", "leaving", "approach", "approaching", "loiter", "loitering", "suspicious", "gather", "gathering", "crowd", "cross", "crossed", "carry", "carrying", "alarm", "interact", "park", "stop", "fall", "run", "running"],
+  "events": ["enter", "entered", "entering", "exit", "exited", "exiting", "leave", "leaving", "approach", "approaching", "loiter", "loitering", "suspicious", "gather", "gathering", "crowd", "cross", "crossed", "carry", "carrying", "alarm", "interact", "park", "stop", "fall", "fell", "falling", "run", "running"],
   "track_events": ["enter", "entered", "entering", "exit", "exited", "exiting", "leave", "leaving", "approach", "approaching", "loiter", "loitering", "suspicious", "gather", "gathering", "crowd"],
   "temporal_markers": {"after": "after", "before": "before", "during": "during", "between": "between"},
   "count_words": ["how", "count", "many"],

@@ -7,6 +7,7 @@ Run `.\.venv\Scripts\python.exe run.py`. The same Flask application serves the b
 | GET | `/api/status` | Model readiness and current index status |
 | GET | `/api/assets` | Bundled sample videos |
 | GET | `/api/assets/<name>` | Stream a bundled sample video |
+| GET | `/api/model/health` | Selected provider plus text, vision, NVIDIA, and Groq capability state |
 | POST | `/api/videos/upload` | Store and validate an MP4, create `video_id` and `job_id`, and start processing |
 | GET | `/api/videos/<video_id>` | Real video metadata, logical chunks, and processing summary |
 | GET | `/api/videos/<video_id>/content` | Stream the immutable stored upload |

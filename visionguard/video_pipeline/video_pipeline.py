@@ -12,6 +12,11 @@ import numpy as np
 from visionguard.runtime.cache import setup_cache
 from visionguard.model_services.clip_generator import ClipGenerator
 from visionguard.model_services.nvidia_verifier import NvidiaFrameVerifier
+from visionguard.model_services.model_provider import (
+    ModelProviderError,
+    create_model_provider,
+    model_health_snapshot,
+)
 from visionguard.model_services.report_generator import ReportGenerator
 from visionguard.model_services.segmenter import GroundedSegmenter
 from visionguard.model_services.tracker import ObjectTracker
@@ -34,6 +39,8 @@ class VisionGuardPipeline:
         self.trk = ObjectTracker(model=os.getenv("YOLO_MODEL") or yolo)
         self.enc = SearchEncoder(model=os.getenv("CLIP_MODEL") or clip_model)
         self.query_planner = DeterministicQueryPlanner()
+        self.model_provider = create_model_provider()
+        self._model_health_cache = (0.0, None)
         self.vlm = self.enc
         self.ver = NvidiaFrameVerifier(model=os.getenv("NVIDIA_VLM_MODEL") or verifier_model)
         self.seg = GroundedSegmenter(sam=os.getenv("SAM_MODEL") or sam, verifier_model=os.getenv("VERIFIER_MODEL") or verifier_model, verifier=self.ver)
@@ -520,7 +527,9 @@ class VisionGuardPipeline:
             label = ", ".join(row.get("objects", [])) or query
             detail = caption or f"visible match for {query}"
             if verification_mode == "nvidia_api":
-                row["summary"] = f"NVIDIA API-verified query match at {row.get('peak_ts', row['start']):.2f}s | {detail} | detected: {label}"
+                row["summary"] = f"NVIDIA-verified query match at {row.get('peak_ts', row['start']):.2f}s | {detail} | detected: {label}"
+            elif verification_mode == "llama_cpp_vision":
+                row["summary"] = f"Local vision-verified query match at {row.get('peak_ts', row['start']):.2f}s | {detail} | detected: {label}"
             else:
                 row["summary"] = f"unconfirmed query match at {row.get('peak_ts', row['start']):.2f}s | {detail} | detected: {label}"
         elif caption:
@@ -530,7 +539,7 @@ class VisionGuardPipeline:
         else:
             row["score"] = float(row["score"] * 0.5)
             row["low_confidence"] = True
-            if verification_mode in {"nvidia_api_unconfigured", "nvidia_api_unavailable", "unknown"}:
+            if verification_mode == "unknown" or verification_mode.endswith(("_unconfigured", "_unavailable", "_disabled")):
                 row["summary"] = (
                     f"detector/retrieval candidate at {row.get('peak_ts', row['start']):.2f}s "
                     f"(verification unavailable: {verification_mode})"
@@ -541,8 +550,8 @@ class VisionGuardPipeline:
         if not rows:
             return rows
         mode = self.verification_mode()
-        if mode == "nvidia_api_unconfigured" or not getattr(self.ver, "api_key", None):
-            self._mark_unverified(rows, mode="nvidia_api_unconfigured")
+        if not self.ver.is_ready():
+            self._mark_unverified(rows, mode=mode)
             return sorted(rows, key=lambda x: x["score"], reverse=True)
         take = min(top_n, len(rows))
         futures = {
@@ -564,7 +573,7 @@ class VisionGuardPipeline:
                     "confidence": 0.0,
                     "caption": "",
                     "boxes": [],
-                    "verification_mode": "nvidia_api_unavailable",
+                    "verification_mode": self.verification_mode(),
                 }
         for i, result in enumerate(results):
             if result is None:
@@ -586,8 +595,8 @@ class VisionGuardPipeline:
         if not rows:
             return
         mode = self.verification_mode()
-        if mode == "nvidia_api_unconfigured" or not getattr(self.ver, "api_key", None):
-            self._mark_unverified(rows, mode="nvidia_api_unconfigured")
+        if not self.ver.is_ready():
+            self._mark_unverified(rows, mode=mode)
             for i, row in enumerate(rows[:top_n]):
                 yield i, row
             return
@@ -611,7 +620,7 @@ class VisionGuardPipeline:
                     "confidence": 0.0,
                     "caption": "",
                     "boxes": [],
-                    "verification_mode": "nvidia_api_unavailable",
+                    "verification_mode": self.verification_mode(),
                 }
         for i, result in enumerate(results):
             if result is None:
@@ -870,6 +879,7 @@ class VisionGuardPipeline:
             chunk = sample_indices[offset: offset + batch_size]
             batch_frames = vr.get_batch(chunk)
             valid = [(i, frame) for i, frame in zip(chunk, batch_frames) if frame is not None]
+            processed_before_batch = processed_samples
             processed_samples += len(chunk)
             if not valid:
                 timings["frame_read_filter"] += time.perf_counter() - read_filter_started
@@ -941,11 +951,12 @@ class VisionGuardPipeline:
                 kept_frames += 1
                 last_kept_objects = set(objs.keys())
                 last_keep_ts = ts
+                current_processed = processed_before_batch + chunk.index(i) + 1
                 elapsed = max(1e-6, time.perf_counter() - t0)
-                sample_rate = processed_samples / elapsed
-                remain = max(0, total_samples - processed_samples)
+                sample_rate = current_processed / elapsed
+                remain = max(0, total_samples - current_processed)
                 eta = remain / sample_rate if sample_rate > 0 else 0.0
-                pct = min(100.0, 100.0 * processed_samples / total_samples)
+                pct = min(100.0, 100.0 * current_processed / total_samples)
                 status = (
                     f"scanning {ts:.1f}s / {dur:.1f}s | {pct:.0f}% | eta {eta:.1f}s | "
                     f"kept {kept_frames} | det {timings['detection_tracking']:.0f}s | "
@@ -959,7 +970,7 @@ class VisionGuardPipeline:
                     "status": status,
                     "frame_number": int(i),
                     "timestamp_ms": int(i * 1000.0 / fps),
-                    "processed_samples": int(processed_samples),
+                    "processed_samples": int(current_processed),
                     "total_samples": int(total_samples),
                     "kept_frames": int(kept_frames),
                     "detections": int(len(det_rows)),
@@ -1255,9 +1266,11 @@ class VisionGuardPipeline:
 
     def warmup_status(self) -> str:
         if not self._warmup_done:
-            return "Models loading..."
+            if os.getenv("VISION_GUARD_SKIP_WARMUP") == "1":
+                return "Video detector and retrieval models load on demand."
+            return "Video models loading..."
         if not self._warmup_failures:
-            return "All models ready."
+            return "Video detector and retrieval models ready."
         return "WARNING: " + " | ".join(
             f"{k} failed: {v}" for k, v in self._warmup_failures.items()
         )
@@ -1275,15 +1288,76 @@ class VisionGuardPipeline:
             return "nvidia_api_unconfigured" if backend == "unconfigured" else "nvidia_api_unavailable"
         return "unknown"
 
+    def model_health(self, refresh=False):
+        checked_at, cached = self._model_health_cache
+        if not refresh and cached is not None and time.monotonic() - checked_at < 5.0:
+            return cached
+        snapshot = model_health_snapshot(self.model_provider)
+        self._model_health_cache = (time.monotonic(), snapshot)
+        return snapshot
+
+    def _model_assisted_query(self, query, detector_labels):
+        health = self.model_health().get("text_model", {})
+        if not health.get("reachable"):
+            return query, {
+                "used": False,
+                "provider": self.model_provider.provider_name,
+                "message": health.get("message", "Selected text model is unavailable."),
+            }
+        label_list = sorted({str(label).strip().casefold() for label in detector_labels if str(label).strip()})
+        prompt = (
+            "Convert the CCTV search request into conservative JSON. "
+            "detector_entities may contain only exact values from detector_labels. "
+            "Do not invent observations, identities, frame numbers, or timestamps. "
+            'Return keys detector_entities, events, attributes. '
+            f"detector_labels={json.dumps(label_list)} request={json.dumps(query)}"
+        )
+        try:
+            raw = self.model_provider.chat(
+                [{"role": "system", "content": "You normalize search intent; you never claim evidence."},
+                 {"role": "user", "content": prompt}],
+                json_mode=True,
+                temperature=0.1,
+            )
+            parsed = json.loads(raw)
+        except (ModelProviderError, json.JSONDecodeError, TypeError) as exc:
+            return query, {
+                "used": False,
+                "provider": self.model_provider.provider_name,
+                "message": f"Model intent parsing failed; deterministic parsing used: {exc}",
+            }
+        allowed = set(label_list)
+        entities = [
+            str(value).strip().casefold() for value in parsed.get("detector_entities", [])
+            if str(value).strip().casefold() in allowed
+        ]
+        safe_terms = []
+        for key in ("events", "attributes"):
+            values = parsed.get(key, [])
+            if not isinstance(values, list):
+                continue
+            for value in values[:5]:
+                term = " ".join(re.findall(r"[a-z0-9]+", str(value).casefold()))
+                if term and len(term) <= 40:
+                    safe_terms.append(term)
+        assisted = " ".join([query, *entities, *safe_terms]).strip()
+        return assisted, {
+            "used": True,
+            "provider": self.model_provider.provider_name,
+            "message": "Text model normalized intent; retrieval still requires stored evidence.",
+        }
+
     def embedding_mode(self):
         return self.enc.mode()
 
     def plan_query(self, query):
         try:
-            detector_labels = self.trk.names().values()
+            detector_labels = tuple(self.trk.names().values())
         except Exception:
             detector_labels = ()
-        plan = self.query_planner.plan(query, detector_labels=detector_labels)
+        assisted_query, model_assistance = self._model_assisted_query(query, detector_labels)
+        plan = self.query_planner.plan(assisted_query, detector_labels=detector_labels)
+        plan.query = query
         try:
             self.enc.load()
         except Exception:
@@ -1301,25 +1375,29 @@ class VisionGuardPipeline:
             executable = False
             message = "Speech queries are not available because this project does not index audio transcripts."
         elif "visual_semantic" in routes and mode != "semantic_embeddings":
-            if self.verification_mode() == "nvidia_api":
+            if self.ver.is_ready():
                 routes.add("exhaustive_visual_verification")
                 plan.retrieval_routes.append("exhaustive_visual_verification")
                 limitations.append("Open query uses bounded verification across sampled indexed frames.")
             else:
                 executable = False
-                message = "This open description needs semantic vision embeddings or configured NVIDIA visual verification. Exact classes are discovered from the active detector at runtime."
+                message = "This request needs semantic vision embeddings or a reachable vision verifier. Exact object queries can still use local detector evidence."
         elif not routes:
             executable = False
             message = "I could not map this request to an indexed object, attribute, action, or event. Please describe what should be visible."
 
         if mode == "metadata_embeddings":
             limitations.append("Semantic vision model unavailable; retrieval is grounded in detector/tracker metadata.")
+        if not model_assistance["used"]:
+            limitations.append(model_assistance["message"])
         payload = plan.to_dict()
         payload.update({
             "embedding_mode": mode,
             "executable": executable,
             "message": message,
             "limitations": sorted(set(limitations)),
+            "model_assistance": model_assistance,
+            "retrieval_query": assisted_query,
         })
         self.last_query_plan = payload
         self.last_query_message = message
@@ -1460,6 +1538,7 @@ class VisionGuardPipeline:
 
     def _candidate_hits(self, raw_q, top_k=4):
         query_plan = self.plan_query(raw_q)
+        retrieval_query = query_plan.get("retrieval_query") or raw_q
         if not query_plan["executable"]:
             dimension = max(1, int(getattr(self.enc, "fallback_dimension", 1)))
             return self._normalize_query(raw_q), np.zeros((dimension,), dtype=np.float32), query_plan.get("entities", []), [], 0
@@ -1467,8 +1546,8 @@ class VisionGuardPipeline:
             candidates = self._exhaustive_visual_candidates(self._normalize_query(raw_q))
             dimension = max(1, int(getattr(self.enc, "fallback_dimension", 1)))
             return self._normalize_query(raw_q), np.zeros((dimension,), dtype=np.float32), [], candidates, len(candidates)
-        q = self._normalize_query(raw_q)
-        qv = self._embed_query(raw_q)
+        q = self._normalize_query(retrieval_query)
+        qv = self._embed_query(retrieval_query)
         qobjs = self._q_objs(q)
         qcolors = set(self._query_colors(q))
         # Handle temporal queries via track trajectory features

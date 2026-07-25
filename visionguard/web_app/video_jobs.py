@@ -47,7 +47,9 @@ def probe_video(path: Path) -> dict:
     duration_ms = int(round(frame_count * 1000.0 / fps))
     return {
         "duration_ms": duration_ms,
-        "fps": round(fps, 6),
+        # Keep the authoritative decoder FPS value. Rounding it here can shift
+        # long-video frame timestamps by a millisecond or more.
+        "fps": fps,
         "width": width,
         "height": height,
         "frame_count": frame_count,

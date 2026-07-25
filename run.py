@@ -11,12 +11,12 @@ load_project_env(ROOT)
 
 
 def main() -> None:
-    from visionguard.web_app.server import create_app
+    from visionguard.web_app.server import app
 
     host = os.getenv("VISION_GUARD_HOST", "127.0.0.1")
     port = int(os.getenv("VISION_GUARD_PORT", "7860"))
     print(f"VisionGuard video UI: http://{host}:{port}")
-    create_app().run(host=host, port=port, debug=False, threaded=True)
+    app.run(host=host, port=port, debug=False, threaded=True, load_dotenv=False)
 
 
 if __name__ == "__main__":

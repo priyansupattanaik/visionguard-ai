@@ -1,6 +1,7 @@
 import numpy as np
 
 from visionguard.model_services.metadata_encoder import MetadataSearchEncoder
+from visionguard.model_services.model_provider import NoneModelProvider
 from visionguard.search import DeterministicQueryPlanner
 from visionguard.video_pipeline.video_pipeline import VisionGuardPipeline
 
@@ -59,6 +60,7 @@ def test_planner_routes_supported_track_event_without_semantic_guessing():
 
 def test_color_metadata_is_generated_for_a_runtime_discovered_class(tmp_path):
     pipe = VisionGuardPipeline(out_dir=str(tmp_path / "output"))
+    pipe.model_provider = NoneModelProvider()
     frame = np.zeros((80, 80, 3), dtype=np.uint8)
     frame[:, :] = (0, 0, 255)
 
@@ -68,12 +70,14 @@ def test_color_metadata_is_generated_for_a_runtime_discovered_class(tmp_path):
     assert "red custom crate" in tags
 
 
-def test_open_query_uses_bounded_visual_verification_when_configured(tmp_path):
+def test_open_query_uses_bounded_visual_verification_when_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MODEL_PROVIDER", "nvidia")
+    monkeypatch.setenv("NVIDIA_API_KEY", "configured-for-test")
     pipe = VisionGuardPipeline(out_dir=str(tmp_path / "output"))
+    pipe.model_provider = NoneModelProvider()
     pipe.trk.names = lambda: {0: "known class"}
     pipe.enc.fallback = True
-    pipe.ver.api_key = "configured-for-test"
-    pipe.ver._last_error = None
+    pipe.ver.warmup()
     pipe.idx = {
         "video": "test.mp4",
         "meta": {"duration": 10.0, "sample_sec": 1.0},

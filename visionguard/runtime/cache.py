@@ -45,7 +45,6 @@ def setup_cache():
     _setup_hf_token()
     paths = {
         "HF_HOME": os.path.join(base, "hf"),
-        "TRANSFORMERS_CACHE": os.path.join(base, "hf", "transformers"),
         "HUGGINGFACE_HUB_CACHE": os.path.join(base, "hf", "hub"),
         "TORCH_HOME": os.path.join(base, "torch"),
         "YOLO_CONFIG_DIR": os.path.join(base, "ultralytics"),
@@ -53,7 +52,7 @@ def setup_cache():
     }
     for key, path in paths.items():
         os.environ.setdefault(key, path)
-    for k in ["HF_HOME", "TRANSFORMERS_CACHE", "HUGGINGFACE_HUB_CACHE", "TORCH_HOME", "YOLO_CONFIG_DIR"]:
+    for k in ["HF_HOME", "HUGGINGFACE_HUB_CACHE", "TORCH_HOME", "YOLO_CONFIG_DIR"]:
         os.makedirs(os.environ[k], exist_ok=True)
 
 

@@ -49,6 +49,12 @@
     zeroQueryInventory: $("#zeroQueryInventory"),
     zeroQueryTimeline: $("#zeroQueryTimeline"),
     toastContainer: $("#toastContainer"),
+    providerName: $("#providerName"),
+    textModelStatus: $("#textModelStatus"),
+    visionModelStatus: $("#visionModelStatus"),
+    nvidiaStatus: $("#nvidiaStatus"),
+    groqStatus: $("#groqStatus"),
+    modelNotice: $("#modelNotice"),
   };
 
   async function fetchJson(url, options = {}) {
@@ -92,6 +98,48 @@
     if (!els.verificationStatus) return;
     els.verificationStatus.textContent = warning ? `${label}. ${warning}` : label;
     els.verificationStatus.className = warning ? "verification-chip warn" : "verification-chip";
+  }
+
+  function setCapability(element, label, stateName) {
+    if (!element) return;
+    element.textContent = label;
+    element.className = `capability-state ${stateName}`;
+  }
+
+  function providerLabel(name) {
+    if (name === "llama_cpp") return "llama.cpp";
+    if (name === "none") return "None";
+    return name ? name.charAt(0).toUpperCase() + name.slice(1) : "Unknown";
+  }
+
+  async function loadModelHealth() {
+    try {
+      const data = await fetchJson("/api/model/health");
+      if (els.providerName) els.providerName.textContent = providerLabel(data.selected_provider);
+      const textModel = data.text_model || {};
+      const visionModel = data.vision_model || {};
+      setCapability(
+        els.textModelStatus,
+        textModel.reachable ? "Connected" : (textModel.configured ? "Disconnected" : "Disabled"),
+        textModel.reachable ? "connected" : (textModel.configured ? "disconnected" : "disabled"),
+      );
+      setCapability(
+        els.visionModelStatus,
+        visionModel.reachable ? "Connected" : (visionModel.configured ? "Disconnected" : "Not configured"),
+        visionModel.reachable ? "connected" : (visionModel.configured ? "disconnected" : "disabled"),
+      );
+      if (els.nvidiaStatus) els.nvidiaStatus.textContent = data.external_providers?.nvidia || "disabled";
+      if (els.groqStatus) els.groqStatus.textContent = data.external_providers?.groq || "disabled";
+      if (els.modelNotice) {
+        els.modelNotice.textContent = textModel.reachable
+          ? `${providerLabel(data.selected_provider)} text reasoning is connected. Evidence rules remain enforced by the backend.`
+          : `${textModel.message || "The selected text model is unavailable"} Video upload, frame extraction, and detector-backed object search remain available.`;
+      }
+    } catch (error) {
+      setCapability(els.textModelStatus, "Health check failed", "disconnected");
+      setCapability(els.visionModelStatus, "Unknown", "disabled");
+      if (els.modelNotice) els.modelNotice.textContent = `Model health could not be loaded: ${error.message}`;
+    }
   }
 
   function showToast(message, type = "info") {
@@ -257,9 +305,11 @@
     try {
       const data = await fetchJson("/api/status");
       els.statusText.textContent = data.status;
+      $("#systemStatus")?.classList.remove("error");
       setVerification(data.verification_label, data.warning);
     } catch (error) {
       els.statusText.textContent = error.message;
+      $("#systemStatus")?.classList.add("error");
     }
   }
 
@@ -456,4 +506,5 @@
   setSearchReady(false);
   loadAssets().catch((error) => setMessage(els.scanStatus, error.message, "error"));
   loadStatus();
+  loadModelHealth();
 })();

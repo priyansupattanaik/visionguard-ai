@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import subprocess
@@ -95,6 +96,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--video", type=Path, default=ROOT / "sample_videos" / "asset3.mp4")
     parser.add_argument("--query", default="find the person")
+    parser.add_argument("--insufficient-query", default="person fell from cycle")
+    parser.add_argument("--screenshot", type=Path)
     parser.add_argument("--server-port", type=int, default=7861)
     parser.add_argument("--debug-port", type=int, default=9223)
     args = parser.parse_args()
@@ -107,6 +110,9 @@ def main() -> None:
         "VISION_GUARD_PORT": str(args.server_port),
         "VISION_GUARD_SKIP_WARMUP": "1",
         "VERIFIER_READY_TIMEOUT": "0",
+        "MODEL_PROVIDER": "llama_cpp",
+        "LLAMA_CPP_TEXT_URL": "http://127.0.0.1:8080",
+        "LLAMA_CPP_VISION_URL": "http://127.0.0.1:8081",
         "NVIDIA_API_KEY": " ",
         "PYTHONDONTWRITEBYTECODE": "1",
     })
@@ -157,8 +163,17 @@ def main() -> None:
             devtools.evaluate("document.querySelectorAll('#resultsList .match-card__content')[1].click(); true")
             time.sleep(0.5)
 
-            desktop = devtools.evaluate("({queryDisabled:document.querySelector('#queryInput').disabled, stages:[...document.querySelectorAll('#processingTimeline .stage-row small')].map(x=>x.textContent), evidenceCount:document.querySelectorAll('#evidenceStrip .evidence-thumb').length, eventCount:document.querySelectorAll('#backendConsole li').length, resultCount:document.querySelectorAll('#resultsList .match-card').length, resultTitle:document.querySelectorAll('#resultsList .match-card__content strong')[1].textContent, inspectorVisible:getComputedStyle(document.querySelector('#frameInspector')).display !== 'none', videoTime:document.querySelector('#videoPreview').currentTime, imageWidth:document.querySelector('#resultsList .match-card__image').naturalWidth, bodyText:document.body.innerText})")
+            desktop = devtools.evaluate("({queryDisabled:document.querySelector('#queryInput').disabled, stages:[...document.querySelectorAll('#processingTimeline .stage-row small')].map(x=>x.textContent), evidenceCount:document.querySelectorAll('#evidenceStrip .evidence-thumb').length, eventCount:document.querySelectorAll('#backendConsole li').length, resultCount:document.querySelectorAll('#resultsList .match-card').length, resultTitle:document.querySelectorAll('#resultsList .match-card__content strong')[1].textContent, inspectorVisible:getComputedStyle(document.querySelector('#frameInspector')).display !== 'none', videoTime:document.querySelector('#videoPreview').currentTime, imageWidth:document.querySelector('#resultsList .match-card__image').naturalWidth, provider:document.querySelector('#providerName').textContent, textModel:document.querySelector('#textModelStatus').textContent, visionModel:document.querySelector('#visionModelStatus').textContent, bodyText:document.body.innerText})")
             expected_seconds = float(desktop["resultTitle"].split("s", 1)[0])
+            if args.screenshot:
+                screenshot_path = args.screenshot.resolve()
+                screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+                screenshot = devtools.call("Page.captureScreenshot", {"format": "png", "captureBeyondViewport": True})
+                screenshot_path.write_bytes(base64.b64decode(screenshot["data"]))
+
+            devtools.evaluate(f"document.querySelector('#queryInput').value = {json.dumps(args.insufficient_query)}; document.querySelector('#queryButton').click(); true")
+            wait_until(devtools, "document.querySelector('#queryStatus').textContent.toLowerCase().includes('insufficient evidence')", 60, "honest insufficient-evidence response")
+            insufficient = devtools.evaluate("({status:document.querySelector('#queryStatus').textContent, resultCount:document.querySelectorAll('#resultsList .match-card').length})")
 
             devtools.call("Emulation.setDeviceMetricsOverride", {"width": 390, "height": 844, "deviceScaleFactor": 1, "mobile": True})
             time.sleep(0.3)
@@ -176,6 +191,13 @@ def main() -> None:
                 "result_timestamp_seconds": expected_seconds,
                 "video_current_time": desktop["videoTime"],
                 "seek_matches_result": abs(desktop["videoTime"] - expected_seconds) < 0.15,
+                "provider": desktop["provider"],
+                "text_model_status": desktop["textModel"],
+                "vision_model_status": desktop["visionModel"],
+                "insufficient_query": args.insufficient_query,
+                "insufficient_query_status": insufficient["status"],
+                "insufficient_query_result_count": insufficient["resultCount"],
+                "insufficient_query_is_grounded": insufficient["resultCount"] == 0,
                 "ocr_marked_skipped": "ocr completed" in desktop["bodyText"].lower() and "ocr is not implemented" in desktop["bodyText"].lower(),
                 "captioning_marked_skipped": "captions generated" in desktop["bodyText"].lower() and "caption generation is not implemented" in desktop["bodyText"].lower(),
                 "mobile_metrics": mobile,
@@ -194,6 +216,10 @@ def main() -> None:
                 result["result_image_width"] > 0,
                 result["frame_inspector_visible"],
                 result["seek_matches_result"],
+                result["provider"] == "llama.cpp",
+                result["text_model_status"] == "Disconnected",
+                result["vision_model_status"] == "Disconnected",
+                result["insufficient_query_is_grounded"],
                 result["ocr_marked_skipped"],
                 result["captioning_marked_skipped"],
                 result["mobile_has_no_horizontal_overflow"],

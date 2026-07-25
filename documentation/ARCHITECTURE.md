@@ -19,4 +19,6 @@ flowchart LR
 
 The preferred retrieval path uses SigLIP embeddings. When that model is unavailable, the fallback index is still meaningful: it encodes detected classes, colors, appearances, and motion rather than zero vectors. Exact detector-label queries remain local. Open descriptions can use bounded NVIDIA frame verification when configured; otherwise the response reports that the capability is unavailable instead of inventing a match.
 
+Text reasoning is selected through `MODEL_PROVIDER` and supports `llama_cpp`, `nvidia`, `groq`, and `none`. llama.cpp is the local-first default. Provider health and query-intent normalization are isolated from ingestion, so an unavailable text or vision endpoint cannot prevent video storage, metadata probing, frame extraction, detection, or deterministic timestamps. Open visual claims still require semantic or vision evidence; a text model alone cannot promote an unsupported event to a result.
+
 Looking Glass informed the decision to keep ingestion, model services, and search responsibilities distinct. Its source was not copied because the inspected repository did not contain a license file, and its heavier Qdrant, React, Ollama, and multi-model stack would add unnecessary operational dependencies here.

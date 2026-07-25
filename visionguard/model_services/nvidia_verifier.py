@@ -1,4 +1,4 @@
-"""Hosted NVIDIA VLM verification client (no local language model runtime)."""
+"""Evidence-frame verifier for selected llama.cpp vision or optional NVIDIA VLM."""
 import base64
 import json
 import mimetypes
@@ -10,38 +10,75 @@ from urllib.request import Request, urlopen
 
 from PIL import Image
 
+from visionguard.model_services.model_provider import OpenAICompatibleProvider
+
 
 class NvidiaFrameVerifier:
     def __init__(self, model=None, timeout=None):
-        self.model_name = model or os.getenv("NVIDIA_VLM_MODEL", "nvidia/llama-3.1-nemotron-nano-vl-8b-v1")
-        self.endpoint = os.getenv("NVIDIA_API_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
-        self.api_key = os.getenv("NVIDIA_API_KEY", "").strip()
-        self.timeout = float(timeout or os.getenv("NVIDIA_API_TIMEOUT", "30"))
+        self.selected_provider = os.getenv("MODEL_PROVIDER", "llama_cpp").strip().casefold()
+        if self.selected_provider == "llama_cpp":
+            self.base_url = os.getenv("LLAMA_CPP_VISION_URL", "http://127.0.0.1:8081").strip().rstrip("/")
+            self.endpoint = f"{self.base_url}/v1" if self.base_url and not self.base_url.endswith("/v1") else self.base_url
+            self.model_name = os.getenv("LLAMA_CPP_VISION_MODEL", "local")
+            self.api_key = ""
+            self.timeout = float(timeout or os.getenv("LLAMA_CPP_TIMEOUT_SECONDS", "120"))
+            self.available_mode = "llama_cpp_vision"
+        elif self.selected_provider == "nvidia":
+            self.base_url = (os.getenv("NVIDIA_BASE_URL") or os.getenv("NVIDIA_API_BASE_URL", "https://integrate.api.nvidia.com/v1")).rstrip("/")
+            self.endpoint = self.base_url
+            self.model_name = model or os.getenv("NVIDIA_VLM_MODEL", "nvidia/llama-3.1-nemotron-nano-vl-8b-v1")
+            self.api_key = os.getenv("NVIDIA_API_KEY", "").strip()
+            self.timeout = float(timeout or os.getenv("NVIDIA_API_TIMEOUT", "30"))
+            self.available_mode = "nvidia_api"
+        else:
+            self.base_url = ""
+            self.endpoint = ""
+            self.model_name = ""
+            self.api_key = ""
+            self.timeout = float(timeout or 30)
+            self.available_mode = "verification_disabled"
         self.backend = "unconfigured"
         self.cache, self.lock = {}, threading.Lock()
         self._last_error = None
         self._ready = False
 
     def warmup(self):
-        if not self.api_key:
+        if self.selected_provider == "llama_cpp":
+            if not self.base_url:
+                self.backend = "unconfigured"
+                self._ready = False
+                self._last_error = None
+                return False
+            result = OpenAICompatibleProvider(
+                "llama_cpp", self.base_url, self.model_name, timeout=min(self.timeout, 2.0)
+            ).health()
+            self._ready = bool(result["reachable"])
+            self._last_error = None if self._ready else result["message"]
+            self.backend = self.available_mode if self._ready else "unavailable"
+            return self._ready
+        if self.selected_provider != "nvidia" or not self.api_key:
             self.backend = "unconfigured"
             self._ready = False
             self._last_error = None
             return False
-        self.backend = "nvidia_api"
+        self.backend = self.available_mode
         self._ready = True
         self._last_error = None
         return True
 
     def verification_mode(self):
-        if not self.api_key:
+        if self.available_mode == "verification_disabled":
+            return "verification_disabled"
+        if self.selected_provider == "nvidia" and not self.api_key:
             return "nvidia_api_unconfigured"
+        if self.selected_provider == "llama_cpp" and not self.base_url:
+            return "llama_cpp_vision_unconfigured"
         if self._last_error:
-            return "nvidia_api_unavailable"
-        return "nvidia_api"
+            return f"{self.available_mode}_unavailable"
+        return self.available_mode if self._ready else f"{self.available_mode}_unavailable"
 
     def is_ready(self):
-        return bool(self.api_key) and self._last_error is None
+        return bool(self._ready) and self._last_error is None
 
     def _threshold(self, query):
         return float(os.getenv("NVIDIA_VERIFY_THRESHOLD", "0.45"))
@@ -89,8 +126,7 @@ class NvidiaFrameVerifier:
         }
 
     def _ask(self, frame_path, prompt):
-        if not self.api_key:
-            self._last_error = None
+        if not self.is_ready():
             return ""
         if not frame_path or not os.path.isfile(frame_path):
             return ""
@@ -109,14 +145,16 @@ class NvidiaFrameVerifier:
                 ],
             }],
         }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
         request = Request(
             f"{self.endpoint}/chat/completions",
             data=json.dumps(payload).encode(),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+            headers=headers,
             method="POST",
         )
         try:
@@ -124,7 +162,7 @@ class NvidiaFrameVerifier:
                 body = json.load(response)
             content = body["choices"][0]["message"]["content"] or ""
             self._last_error = None
-            self.backend = "nvidia_api"
+            self.backend = self.available_mode
             return content
         except HTTPError as exc:
             self._last_error = f"HTTP {exc.code}"
@@ -136,8 +174,8 @@ class NvidiaFrameVerifier:
             return ""
 
     def verify_query(self, frame_path, query, frame_key=None):
-        if not self.api_key:
-            return self._empty_result("nvidia_api_unconfigured")
+        if not self.is_ready():
+            return self._empty_result(self.verification_mode())
         key = (frame_key or frame_path, " ".join(query.lower().split()))
         with self.lock:
             if key in self.cache:
@@ -156,7 +194,7 @@ class NvidiaFrameVerifier:
         )
         raw = self._ask(frame_path, prompt)
         if not raw and self._last_error:
-            return self._empty_result("nvidia_api_unavailable")
+            return self._empty_result(self.verification_mode())
         data = self._extract_json(raw)
         boxes = self._clean_boxes(data.get("boxes"), image.size)
         confidence = float(data.get("confidence", 0) or 0)
