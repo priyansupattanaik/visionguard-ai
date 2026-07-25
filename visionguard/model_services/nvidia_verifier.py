@@ -12,12 +12,6 @@ from PIL import Image
 
 
 class NvidiaFrameVerifier:
-    _ABSTRACT_TERMS = frozenset({
-        "fight", "fighting", "assault", "brawl", "fall", "falling", "collapse",
-        "collision", "collide", "crash", "accident", "crowd", "crowded",
-        "gathering", "loitering", "loiter", "suspicious", "violence",
-    })
-
     def __init__(self, model=None, timeout=None):
         self.model_name = model or os.getenv("NVIDIA_VLM_MODEL", "nvidia/llama-3.1-nemotron-nano-vl-8b-v1")
         self.endpoint = os.getenv("NVIDIA_API_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
@@ -50,7 +44,7 @@ class NvidiaFrameVerifier:
         return bool(self.api_key) and self._last_error is None
 
     def _threshold(self, query):
-        return 0.30 if any(term in query.lower() for term in self._ABSTRACT_TERMS) else 0.45
+        return float(os.getenv("NVIDIA_VERIFY_THRESHOLD", "0.45"))
 
     @staticmethod
     def _extract_json(text):

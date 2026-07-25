@@ -18,7 +18,7 @@ from visionguard.model_services.tracker import ObjectTracker
 from visionguard.video_pipeline.vector_index import SegmentVectorIndex, _as_2d_float32
 from visionguard.video_pipeline.video_reader import DecordVideoReader
 from visionguard.model_services.vlm import SearchEncoder
-from visionguard.evidence_api.agents.planner import DeterministicQueryPlanner
+from visionguard.search import DeterministicQueryPlanner
 
 setup_cache()
 
@@ -133,8 +133,6 @@ class VisionGuardPipeline:
         tags = []
         for t in detections:
             name = t["name"]
-            if name not in {"person", "car", "truck", "bus", "motorcycle", "bicycle"}:
-                continue
             color = self._estimate_color(frame, t["box"])
             if color:
                 tags.append(f"{color} {name}")
@@ -223,16 +221,6 @@ class VisionGuardPipeline:
             detector_labels = ()
         return self.query_planner.resolve_entities(self._normalize_query(q), detector_labels)
 
-    def _is_event_query(self, q):
-        q = f" {self._normalize_query(q)} "
-        hard_terms = {
-            " accident ", " collision ", " crash ", " hit-and-run ", " pileup ",
-            " fight ", " fighting ", " assault ", " brawl ",
-            " fall ", " falling ", " collapse ",
-            " violence ",
-        }
-        return any(term in q for term in hard_terms)
-
     def _is_temporal_query(self, q):
         """Check if query uses controlled temporal terms that can be answered via tracks."""
         q = f" {self._normalize_query(q)} "
@@ -246,22 +234,7 @@ class VisionGuardPipeline:
         return any(term in q for term in temporal_terms)
 
     def _normalize_query(self, q):
-        q = q.strip().lower()
-        repl = {
-            "peoples": "people",
-            "persons": "person",
-            "human beings": "people",
-            "bike accident": "motorcycle accident",
-            "bikes": "bicycle",
-            "cycles": "bicycle",
-            "cars": "car",
-            "trucks": "truck",
-            "buses": "bus",
-            "umbrellas": "umbrella",
-        }
-        for src, dst in repl.items():
-            q = re.sub(rf"\b{re.escape(src)}\b", dst, q)
-        return " ".join(q.split())
+        return " ".join(re.findall(r"[a-z0-9]+", q.strip().casefold()))
 
     def _query_detector_classes(self, q):
         qobjs = self._q_objs(q)
@@ -276,30 +249,12 @@ class VisionGuardPipeline:
         return class_ids, cls_to_name
 
     def _is_strict_object_query(self, q):
-        tokens = set(self._normalize_query(q).split())
-        if not tokens:
-            return False
-        allowed = {
-            "person", "people", "man", "woman", "human",
-            "car", "truck", "bus", "vehicle", "sedan", "lorry",
-            "motorcycle", "motorbike", "bike", "bicycle", "cycle", "scooter",
-            "umbrella", "parasol",
-            "backpack", "bag", "suitcase", "luggage", "handbag", "purse", "parcel", "package",
-            "yellow", "white", "black", "gray", "red", "blue", "green", "orange", "brown",
-        }
-        return all(x in allowed for x in tokens)
-
-    def _is_simple_unsupported_object_query(self, q):
-        tokens = self._normalize_query(q).split()
-        if not tokens or self._q_objs(q) or self._is_event_query(q):
-            return False
-        color_words = set(self._color_words().keys())
-        stop_words = {
-            "a", "an", "the", "near", "next", "beside", "behind", "front", "of",
-            "on", "in", "at", "with", "without", "left", "right", "top", "bottom",
-        }
-        content = [x for x in tokens if x not in color_words and x not in stop_words]
-        return 0 < len(content) <= 2
+        try:
+            labels = self.trk.names().values()
+        except Exception:
+            labels = ()
+        plan = self.query_planner.plan(q, detector_labels=labels)
+        return bool(plan.entities) and not plan.unknown_terms and not plan.events
 
     def _matching_detections(self, row, qobjs, qcolors, cls_to_name=None):
         out = []
@@ -323,6 +278,31 @@ class VisionGuardPipeline:
                 "color": color,
             })
         return out
+
+    def _merge_detections_with_tracks(self, detections, tracked):
+        """Keep every detector result and attach a track ID when boxes agree."""
+        merged = []
+        used_tracks = set()
+        min_iou = float(os.getenv("TRACK_DETECTION_IOU", "0.5"))
+        for detection in detections or []:
+            row = dict(detection)
+            best_index = None
+            best_iou = 0.0
+            for index, track in enumerate(tracked or []):
+                if index in used_tracks or int(track.get("cls", -1)) != int(row.get("cls", -2)):
+                    continue
+                overlap = self._iou(row["box"], track["box"])
+                if overlap > best_iou:
+                    best_iou = overlap
+                    best_index = index
+            if best_index is not None and best_iou >= min_iou:
+                row["track_id"] = int(tracked[best_index]["id"])
+                used_tracks.add(best_index)
+            merged.append(row)
+        for index, track in enumerate(tracked or []):
+            if index not in used_tracks:
+                merged.append(dict(track))
+        return merged
 
     def _refine_detector_hits(self, q, top_k):
         class_ids, cls_to_name = self._query_detector_classes(q)
@@ -811,10 +791,7 @@ class VisionGuardPipeline:
             nonlocal frames, pending, frame_vec_chunks, frame_id_chunks, crop_vec_chunks, crop_id_chunks, crop_meta_list
             if not pending:
                 return
-            write_futures = [
-                self.pool.submit(cv2.imwrite, item["frame_path"], item["frame"])
-                for item in pending
-            ]
+            write_futures = [item["write_future"] for item in pending]
             embedding_started = time.perf_counter()
             emb_list = self.enc.embed_frames(
                 [x["frame"] for x in pending],
@@ -822,7 +799,8 @@ class VisionGuardPipeline:
             )
             timings["frame_embeddings"] += time.perf_counter() - embedding_started
             for future in write_futures:
-                future.result()
+                if not future.result():
+                    raise RuntimeError("Failed to write an extracted evidence frame.")
             chunk_vecs = []
             chunk_ids = []
             for item, emb in zip(pending, emb_list):
@@ -914,14 +892,9 @@ class VisionGuardPipeline:
                     continue
                 detection_started = time.perf_counter()
                 tracked_dets = self.trk.track_frame(frame, frame_idx=i, ts=ts, cls=None)
-                # Fall back to detect if tracking yields no IDs
-                if not tracked_dets:
-                    raw_dets = self.trk.detect(frame, cls=None, conf=0.18)
-                    detections = raw_dets
-                    track_ids = []
-                else:
-                    detections = tracked_dets
-                    track_ids = [det["id"] for det in tracked_dets if "id" in det]
+                raw_dets = self.trk.detect(frame, cls=None, conf=0.18)
+                detections = self._merge_detections_with_tracks(raw_dets, tracked_dets)
+                track_ids = [det["id"] for det in tracked_dets if "id" in det]
                 timings["detection_tracking"] += time.perf_counter() - detection_started
                 if self._is_non_content_frame(frame, detections):
                     skipped_empty += 1
@@ -932,8 +905,7 @@ class VisionGuardPipeline:
                     name = det["name"]
                     objs[name] = objs.get(name, 0) + 1
                     color = None
-                    if name in {"person", "car", "truck", "bus", "motorcycle", "bicycle"}:
-                        color = self._estimate_color(frame, det["box"])
+                    color = self._estimate_color(frame, det["box"])
                     det_row = {
                         "box": det["box"],
                         "conf": det["conf"],
@@ -941,7 +913,9 @@ class VisionGuardPipeline:
                         "name": name,
                         "color": color,
                     }
-                    if "id" in det:
+                    if "track_id" in det:
+                        det_row["track_id"] = int(det["track_id"])
+                    elif "id" in det:
                         det_row["track_id"] = int(det["id"])
                     det_rows.append(det_row)
                 meta = {
@@ -952,16 +926,17 @@ class VisionGuardPipeline:
                     "motion_score": round(float(motion_score), 5),
                     "keep_reason": keep_reason,
                     "object_delta": len(set(objs.keys()) ^ last_kept_objects),
-                    "still_people": int(objs.get("person", 0) if motion_score < 0.02 else 0),
-                    "person": objs.get("person", 0),
+                    "still_objects": int(sum(objs.values()) if motion_score < 0.02 else 0),
                 }
                 frame_path = os.path.join(self.run_dir, "frames", f"f_{i:06d}.jpg")
+                write_future = self.pool.submit(cv2.imwrite, frame_path, frame)
                 pending.append({
                     "frame_idx": i,
                     "ts": ts,
                     "frame": frame.copy(),
                     "frame_path": frame_path,
                     "meta": meta,
+                    "write_future": write_future,
                 })
                 kept_frames += 1
                 last_kept_objects = set(objs.keys())
@@ -976,7 +951,25 @@ class VisionGuardPipeline:
                     f"kept {kept_frames} | det {timings['detection_tracking']:.0f}s | "
                     f"emb {timings['frame_embeddings']:.0f}s"
                 )
-                yield {"kind": "preview", "image": self._preview(frame, det_rows, ts), "status": status}
+                if not write_future.result():
+                    raise RuntimeError(f"Failed to write evidence frame {frame_path}.")
+                yield {
+                    "kind": "preview",
+                    "image": self._preview(frame, det_rows, ts),
+                    "status": status,
+                    "frame_number": int(i),
+                    "timestamp_ms": int(i * 1000.0 / fps),
+                    "processed_samples": int(processed_samples),
+                    "total_samples": int(total_samples),
+                    "kept_frames": int(kept_frames),
+                    "detections": int(len(det_rows)),
+                    "frame_path": frame_path,
+                    "objects": sorted(meta["objects"].keys()),
+                    "tracks": meta["tracks"],
+                    "detection_rows": det_rows,
+                    "motion_score": meta["motion_score"],
+                    "selection_reason": meta["keep_reason"],
+                }
                 if len(pending) >= self.enc.image_batch_size:
                     flush_pending()
         flush_pending()
@@ -999,7 +992,7 @@ class VisionGuardPipeline:
             objs = {}
             tids = set()
             motion_scores = []
-            still_people = 0
+            still_objects = 0
             forced_keeps = 0
             object_delta = 0
             for x in chunk:
@@ -1007,7 +1000,7 @@ class VisionGuardPipeline:
                 for k, v in x["meta"]["objects"].items():
                     objs[k] = max(objs.get(k, 0), v)
                 motion_scores.append(float(x["meta"].get("motion_score", 0.0)))
-                still_people += int(x["meta"].get("still_people", 0))
+                still_objects += int(x["meta"].get("still_objects", 0))
                 object_delta += int(x["meta"].get("object_delta", 0))
                 if x["meta"].get("keep_reason") == "forced_gap":
                     forced_keeps += 1
@@ -1023,7 +1016,7 @@ class VisionGuardPipeline:
                 "temporal_stats": {
                     "avg_motion": round(float(np.mean(motion_scores)) if motion_scores else 0.0, 5),
                     "max_motion": round(float(np.max(motion_scores)) if motion_scores else 0.0, 5),
-                    "still_people_frames": still_people,
+                    "still_object_frames": still_objects,
                     "forced_keep_frames": forced_keeps,
                     "object_delta_sum": object_delta,
                 },
@@ -1068,7 +1061,7 @@ class VisionGuardPipeline:
                     "detections": x["meta"]["detections"],
                     "motion_score": x["meta"].get("motion_score", 0.0),
                     "keep_reason": x["meta"].get("keep_reason", ""),
-                    "still_people": x["meta"].get("still_people", 0),
+                    "still_objects": x["meta"].get("still_objects", 0),
                     "object_delta": x["meta"].get("object_delta", 0),
                 }
                 for x in frames
@@ -1117,7 +1110,7 @@ class VisionGuardPipeline:
                         "detections": x["detections"],
                         "motion_score": x.get("motion_score", 0.0),
                         "keep_reason": x.get("keep_reason", ""),
-                        "still_people": x.get("still_people", 0),
+                        "still_objects": x.get("still_objects", 0),
                         "object_delta": x.get("object_delta", 0),
                     }
                     for x in self.idx["frames"]
@@ -1308,18 +1301,20 @@ class VisionGuardPipeline:
             executable = False
             message = "Speech queries are not available because this project does not index audio transcripts."
         elif "visual_semantic" in routes and mode != "semantic_embeddings":
-            executable = False
-            if plan.events:
-                message = "This action or event needs the visual embedding model (and preferably NVIDIA verification); detector metadata alone cannot verify it."
+            if self.verification_mode() == "nvidia_api":
+                routes.add("exhaustive_visual_verification")
+                plan.retrieval_routes.append("exhaustive_visual_verification")
+                limitations.append("Open query uses bounded verification across sampled indexed frames.")
             else:
-                message = "This description needs the visual embedding model. The offline metadata index can search detected objects, colors, and supported track events only."
+                executable = False
+                message = "This open description needs semantic vision embeddings or configured NVIDIA visual verification. Exact classes are discovered from the active detector at runtime."
         elif not routes:
             executable = False
             message = "I could not map this request to an indexed object, attribute, action, or event. Please describe what should be visible."
 
         if mode == "metadata_embeddings":
             limitations.append("Semantic vision model unavailable; retrieval is grounded in detector/tracker metadata.")
-        payload = plan.model_dump(mode="json")
+        payload = plan.to_dict()
         payload.update({
             "embedding_mode": mode,
             "executable": executable,
@@ -1329,6 +1324,39 @@ class VisionGuardPipeline:
         self.last_query_plan = payload
         self.last_query_message = message
         return payload
+
+    def _exhaustive_visual_candidates(self, query):
+        frames = self.idx.get("frames", [])
+        if not frames:
+            return []
+        limit = max(1, int(os.getenv("MAX_EXHAUSTIVE_VERIFICATION_FRAMES", "24")))
+        if len(frames) <= limit:
+            selected = frames
+        else:
+            positions = np.linspace(0, len(frames) - 1, num=limit, dtype=int)
+            selected = [frames[int(position)] for position in positions]
+        candidates = []
+        for row in selected:
+            start, end = self._clip_bounds(row["ts"])
+            candidates.append({
+                "query": query,
+                "score": 0.0,
+                "base_score": 0.0,
+                "retrieval_mode": "exhaustive_visual_verification",
+                "cache_key": f"open:{row['frame_id']}",
+                "start": start,
+                "end": end,
+                "peak_ts": row["ts"],
+                "representative_frame_path": row["frame_path"],
+                "frame_path": row["frame_path"],
+                "objects": row.get("objects", []),
+                "tracks": row.get("tracks", []),
+                "appearances": row.get("appearances", []),
+                "det_boxes": [],
+                "tags": ["open-query sampled-frame verification"],
+                "summary": "Awaiting visual verification for an open query.",
+            })
+        return candidates
 
     def _temporal_track_hits(self, raw_q, q, qv, top_k):
         """Find hits for temporal queries using track trajectory features."""
@@ -1373,11 +1401,11 @@ class VisionGuardPipeline:
                     if other_tid != tid
                     and other["entry_ts"] <= stats["exit_ts"]
                     and other["exit_ts"] >= stats["entry_ts"]
-                    and other["class_name"] == "person"
+                    and other["class_name"] == stats["class_name"]
                 )
-                if overlaps >= 2 and stats["class_name"] == "person":
+                if overlaps >= 2:
                     score = 0.35 + 0.08 * min(overlaps, 5)
-                    reason = f"gathering ({overlaps + 1} people overlapping)"
+                    reason = f"gathering ({overlaps + 1} {stats['class_name']} tracks overlapping)"
 
             if score < 0.3:
                 continue
@@ -1435,9 +1463,12 @@ class VisionGuardPipeline:
         if not query_plan["executable"]:
             dimension = max(1, int(getattr(self.enc, "fallback_dimension", 1)))
             return self._normalize_query(raw_q), np.zeros((dimension,), dtype=np.float32), query_plan.get("entities", []), [], 0
+        if "exhaustive_visual_verification" in query_plan.get("retrieval_routes", []):
+            candidates = self._exhaustive_visual_candidates(self._normalize_query(raw_q))
+            dimension = max(1, int(getattr(self.enc, "fallback_dimension", 1)))
+            return self._normalize_query(raw_q), np.zeros((dimension,), dtype=np.float32), [], candidates, len(candidates)
         q = self._normalize_query(raw_q)
         qv = self._embed_query(raw_q)
-        ql = q
         qobjs = self._q_objs(q)
         qcolors = set(self._query_colors(q))
         # Handle temporal queries via track trajectory features
@@ -1478,8 +1509,6 @@ class VisionGuardPipeline:
                     score += 0.22 * color_hit
                 else:
                     score -= 0.12
-            if "sitting" in ql and "person" in sobj:
-                score += 0.05
             rows.append({
                 "query": q,
                 "score": score,
@@ -1534,8 +1563,6 @@ class VisionGuardPipeline:
                     score += 0.12 * hit
                 else:
                     score -= 0.1
-            if "sitting" in ql and "person" in sobj:
-                score += 0.05
             seg_rows.append({
                 "query": q,
                 "score": score,

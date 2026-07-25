@@ -1,23 +1,22 @@
-# VisionGuard 2 architecture
+# Architecture
 
-VisionGuard 2 treats persisted, provenance-bearing evidence as the only factual input to question answering. Models propose observations; deterministic contracts record their source, confidence, time interval, frame, object, track, and event identifiers. Retrieval ranks observations, verification may reject them, and reasoning receives accepted evidence only.
+VisionGuard has one operational application and one indexing path. The Flask server accepts a bundled or local video, the pipeline samples frames, YOLO detects and tracks runtime classes, and the encoder stores visual or metadata vectors with timestamps and detection details. Search plans are built from the user query plus the active detector's labels; there is no application object whitelist.
 
 ```mermaid
 flowchart LR
-  V[Video asset] --> I[Hash and metadata ingestion]
-  I --> P[Cached processing stages]
-  P --> E[(SQLite evidence ledger)]
-  E --> K[Knowledge graph and indexes]
-  Q[Question] --> PL[Planner]
-  PL --> R[Hybrid retriever]
-  K --> R
-  R --> VF[Verifier]
-  VF --> RS[Evidence-only reasoner]
-  RS --> A[Grounded response with citations]
+  V[Video] --> S[Sample frames]
+  S --> D[Detect and track]
+  D --> M[Frame metadata]
+  S --> E[Visual embeddings when available]
+  M --> F[Metadata embeddings fallback]
+  E --> I[Vector index]
+  F --> I
+  Q[User query] --> P[Detector-aware query planner]
+  P --> R[Metadata, vector, or bounded visual retrieval]
+  I --> R
+  R --> O[Timestamped evidence]
 ```
 
-The processing boundary is adapter-based. YOLO or GroundingDINO supply detections, BoTSORT supplies tracks, SAM2 supplies masks, Whisper and acoustic models supply timed audio observations, VLMs supply captions or attribute proposals, and deterministic rules combine tracks into temporal events. If an adapter is unavailable, that stage produces no facts.
+The preferred retrieval path uses SigLIP embeddings. When that model is unavailable, the fallback index is still meaningful: it encodes detected classes, colors, appearances, and motion rather than zero vectors. Exact detector-label queries remain local. Open descriptions can use bounded NVIDIA frame verification when configured; otherwise the response reports that the capability is unavailable instead of inventing a match.
 
-SQLite is the current durable implementation. Its narrow repository contract allows DuckDB, PostgreSQL, FAISS, or NetworkX-backed implementations without changing agents. Conversation history is never stored in the evidence ledger and may resolve references only to existing entity IDs.
-
-The in-process queue is a development implementation. Production should use a durable queue and idempotent stage manifests keyed by video SHA-256, model version, and configuration digest.
+Looking Glass informed the decision to keep ingestion, model services, and search responsibilities distinct. Its source was not copied because the inspected repository did not contain a license file, and its heavier Qdrant, React, Ollama, and multi-model stack would add unnecessary operational dependencies here.

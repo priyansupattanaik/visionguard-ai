@@ -13,17 +13,9 @@ from collections import Counter
 
 import numpy as np
 
-from visionguard.evidence_api.query_language import load_query_vocabulary
-
-
 class MetadataSearchEncoder:
     def __init__(self, dimension: int = 256):
         self.dimension = max(64, int(dimension))
-        vocabulary = load_query_vocabulary()
-        self.aliases = {
-            str(alias).casefold(): [str(value).casefold() for value in values]
-            for alias, values in vocabulary.get("object_aliases", {}).items()
-        }
 
     @staticmethod
     def _words(text: str) -> list[str]:
@@ -34,14 +26,6 @@ class MetadataSearchEncoder:
         features = Counter(words)
         for left, right in zip(words, words[1:]):
             features[f"{left}_{right}"] += 1.5
-        for alias, canonical_names in self.aliases.items():
-            alias_words = self._words(alias)
-            if not alias_words:
-                continue
-            phrase = " ".join(words)
-            if re.search(rf"\b{re.escape(' '.join(alias_words))}\b", phrase):
-                for name in canonical_names:
-                    features[name] += 2.0
         return features
 
     def _encode_features(self, features: Counter) -> np.ndarray:

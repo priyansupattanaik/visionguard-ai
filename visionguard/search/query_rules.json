@@ -1,0 +1,9 @@
+{
+  "attributes": ["red", "blue", "black", "white", "yellow", "green", "small", "large", "helmet"],
+  "events": ["enter", "entered", "entering", "exit", "exited", "exiting", "leave", "leaving", "approach", "approaching", "loiter", "loitering", "suspicious", "gather", "gathering", "crowd", "cross", "crossed", "carry", "carrying", "alarm", "interact", "park", "stop", "fall", "run", "running"],
+  "track_events": ["enter", "entered", "entering", "exit", "exited", "exiting", "leave", "leaving", "approach", "approaching", "loiter", "loitering", "suspicious", "gather", "gathering", "crowd"],
+  "temporal_markers": {"after": "after", "before": "before", "during": "during", "between": "between"},
+  "count_words": ["how", "count", "many"],
+  "speech_words": ["said", "speech"],
+  "stop_words": ["the", "a", "an", "did", "was", "what", "which", "show", "find", "locate", "give", "me", "every", "time", "where", "when", "is", "are", "wearing", "with", "in", "on", "at", "of", "to", "please"]
+}

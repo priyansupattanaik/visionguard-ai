@@ -10,6 +10,17 @@ from werkzeug.utils import secure_filename
 from visionguard.runtime.cache import setup_cache
 from visionguard.runtime.env import load_project_env
 from visionguard.video_pipeline.video_pipeline import VisionGuardPipeline
+from visionguard.web_app.video_jobs import (
+    frame_from_progress_event,
+    make_chunks,
+    make_job,
+    materialize_frames,
+    probe_video,
+    public_frame,
+    public_job,
+    update_stage,
+    utc_now,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 load_project_env(ROOT)
@@ -86,9 +97,9 @@ def _register_download(path):
     }
 
 
-def _serialize_match(row):
+def _serialize_match(row, evidence_frame=None):
     mode = row.get("verification_mode") or "unknown"
-    return {
+    payload = {
         "id": row.get("label"),
         "label": row.get("label"),
         "start": round(float(row.get("start", 0.0)), 2),
@@ -102,6 +113,22 @@ def _serialize_match(row):
         "verification_label": _verification_label(mode),
         "low_confidence": bool(row.get("low_confidence")),
     }
+    if evidence_frame is not None:
+        payload["frame"] = public_frame(evidence_frame)
+    return payload
+
+
+def _evidence_frame_for_hit(frames, hit):
+    if not frames:
+        return None
+    candidate_path = hit.get("representative_frame_path") or hit.get("frame_path")
+    if candidate_path:
+        resolved = str(Path(candidate_path).resolve())
+        for frame in frames:
+            if frame.get("_image_path") == resolved:
+                return frame
+    timestamp_ms = int(round(float(hit.get("peak_ts", hit.get("start", 0.0))) * 1000))
+    return min(frames, key=lambda frame: abs(frame["timestamp_ms"] - timestamp_ms))
 
 
 def create_app(testing=False, start_warmup=True, pipeline=None):
@@ -110,12 +137,184 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
     app.config["TESTING"] = testing
     app.config["PIPELINE"] = pipeline or VisionGuardPipeline()
     app.config["LOCK"] = threading.RLock()
+    app.config["STATE_LOCK"] = threading.RLock()
+    app.config["PROCESS_LOCK"] = threading.Lock()
+    app.config["VIDEOS"] = {}
+    app.config["JOBS"] = {}
+    app.config["PROCESS_THREADS"] = {}
+    app.config["ACTIVE_VIDEO_ID"] = None
     app.config["LAST_QUERY"] = ""
     OUTPUT_DIR.mkdir(exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
     if start_warmup and not testing:
         threading.Thread(target=app.config["PIPELINE"].warmup_models, daemon=True).start()
+
+    def register_video(video_path, filename, source_url):
+        path = Path(video_path).resolve()
+        metadata = probe_video(path)
+        video_id = f"video_{uuid4().hex}"
+        job_id = f"job_{uuid4().hex}"
+        job = make_job(job_id, video_id)
+        chunks = make_chunks(video_id, metadata)
+        update_stage(job, "upload_received", "completed", processed=1, total=1, message="Video bytes stored and readable.")
+        update_stage(job, "metadata_extracted", "completed", processed=1, total=1, message="Metadata read from the stored video.")
+        update_stage(job, "video_normalized", "skipped", message="Normalization is not implemented; the original MP4 is processed unchanged.")
+        update_stage(job, "chunks_created", "completed", processed=len(chunks), total=len(chunks), message="Logical 30-second chunks with 5-second overlap created.")
+        update_stage(job, "ocr_completed", "skipped", message="OCR is not implemented for this project.")
+        update_stage(job, "captions_generated", "skipped", message="Frame caption generation is not implemented for this project.")
+        video = {
+            "video_id": video_id,
+            "job_id": job_id,
+            "filename": filename,
+            "status": "processing",
+            "source_url": source_url or f"/api/videos/{video_id}/content",
+            "metadata": metadata,
+            "chunks": chunks,
+            "frames": [],
+            "created_at": utc_now(),
+            "updated_at": utc_now(),
+            "_path": str(path),
+        }
+        with app.config["STATE_LOCK"]:
+            app.config["VIDEOS"][video_id] = video
+            app.config["JOBS"][job_id] = job
+        return video, job
+
+    def set_job_stage(job, name, status, **values):
+        with app.config["STATE_LOCK"]:
+            update_stage(job, name, status, **values)
+
+    def process_video(video_id, job_id):
+        video = app.config["VIDEOS"][video_id]
+        job = app.config["JOBS"][job_id]
+        pipe = app.config["PIPELINE"]
+        try:
+            with app.config["PROCESS_LOCK"]:
+                with app.config["STATE_LOCK"]:
+                    job["status"] = "running"
+                    job["updated_at"] = utc_now()
+                for name in ("frames_extracted", "keyframes_selected", "objects_detected"):
+                    set_job_stage(job, name, "running", total=video["metadata"]["frame_count"])
+                for event in pipe.index_video_iter(video["_path"]):
+                    if event.get("kind") == "preview":
+                        processed = int(event.get("frame_number", 0)) + 1
+                        total = int(video["metadata"]["frame_count"])
+                        kept = int(event.get("kept_frames", 0))
+                        detected = int(event.get("detections", 0))
+                        evidence_frame = frame_from_progress_event(video_id, event)
+                        if evidence_frame is not None:
+                            with app.config["STATE_LOCK"]:
+                                if all(row["frame_id"] != evidence_frame["frame_id"] for row in video["frames"]):
+                                    video["frames"].append(evidence_frame)
+                                    video["updated_at"] = utc_now()
+                        set_job_stage(job, "frames_extracted", "running", processed=processed, total=total, message=event.get("status", ""))
+                        set_job_stage(job, "keyframes_selected", "running", processed=kept, total=total, message=f"{kept} useful frames selected so far.")
+                        set_job_stage(job, "objects_detected", "running", processed=processed, total=total, message=f"Detector processed frame {processed}; {detected} detections on the latest selected frame.")
+                    elif event.get("kind") == "done":
+                        meta = event["meta"]
+                        frames = materialize_frames(video_id, pipe)
+                        if not frames:
+                            raise RuntimeError("Processing produced no readable evidence frames.")
+                        detection_count = sum(len(frame["detections"]) for frame in frames)
+                        vector_count = int(meta.get("nonzero_frame_vectors", 0))
+                        if vector_count < len(frames):
+                            raise RuntimeError(f"Only {vector_count} of {len(frames)} evidence frames have searchable vectors.")
+                        set_job_stage(job, "frames_extracted", "completed", processed=len(frames), total=len(frames), message=f"{len(frames)} real frame images written.")
+                        set_job_stage(job, "keyframes_selected", "completed", processed=len(frames), total=len(frames), message="Frames selected using sampling, motion, content, and object-change rules.")
+                        set_job_stage(job, "objects_detected", "completed", processed=len(frames), total=len(frames), message=f"YOLO processed {len(frames)} frames and stored {detection_count} detections.")
+                        set_job_stage(job, "embeddings_generated", "completed", processed=vector_count, total=len(frames), message=f"{meta.get('embedding_mode', 'unknown')} produced nonzero vectors for every evidence frame.")
+                        set_job_stage(job, "vector_index_updated", "completed", processed=len(frames), total=len(frames), message=f"Frame and segment indexes stored with backend {meta.get('retriever', 'unknown')}.")
+                        set_job_stage(job, "query_ready", "completed", processed=1, total=1, message="Search is enabled because evidence frames and indexes exist.")
+                        with app.config["STATE_LOCK"]:
+                            video["frames"] = frames
+                            video["status"] = "searchable"
+                            video["updated_at"] = utc_now()
+                            video["processing"] = {
+                                "embedding_mode": meta.get("embedding_mode", "unknown"),
+                                "indexed_windows": int(meta.get("segments", 0)),
+                                "object_counts": meta.get("object_counts", {}),
+                                "scan_timings": meta.get("scan_timings", {}),
+                            }
+                            job["status"] = "completed"
+                            job["updated_at"] = utc_now()
+                            app.config["ACTIVE_VIDEO_ID"] = video_id
+                        return
+                raise RuntimeError("Video pipeline ended without a completion event.")
+        except Exception as exc:
+            with app.config["STATE_LOCK"]:
+                video["status"] = "failed"
+                video["updated_at"] = utc_now()
+                job["status"] = "failed"
+                job["error"] = str(exc)
+                job["updated_at"] = utc_now()
+                for stage in job["stages"]:
+                    if stage["status"] == "running":
+                        update_stage(job, stage["name"], "failed", message=str(exc))
+                    elif stage["status"] == "waiting":
+                        update_stage(job, stage["name"], "skipped", message="Not run because processing failed.")
+
+    def launch_processing(video, job):
+        worker = threading.Thread(target=process_video, args=(video["video_id"], job["job_id"]), daemon=True)
+        app.config["PROCESS_THREADS"][job["job_id"]] = worker
+        worker.start()
+
+    def execute_query(query, video_id=None):
+        pipe = app.config["PIPELINE"]
+        video = app.config["VIDEOS"].get(video_id) if video_id else None
+        if video is not None:
+            if video["status"] != "searchable":
+                return {"ok": False, "message": "This video is not searchable yet."}, 409
+            if app.config["ACTIVE_VIDEO_ID"] != video_id:
+                return {"ok": False, "message": "This video is no longer the active in-memory index. Process it again before querying."}, 409
+            evidence_frames = video["frames"]
+        else:
+            evidence_frames = []
+        if not pipe.idx:
+            return {"ok": False, "message": "Scan a video before searching."}, 400
+        if not query:
+            return {"ok": False, "message": "Enter a query before searching."}, 400
+        with app.config["LOCK"]:
+            hits = pipe.search(query, top_k=4)
+            prepared = pipe.prepare_hits(hits, query)
+            app.config["LAST_QUERY"] = query
+            mode = pipe.verification_mode()
+            query_plan = pipe.last_query_plan if hasattr(pipe, "last_query_plan") else None
+            query_message = getattr(pipe, "last_query_message", "")
+            matches = []
+            frames = []
+            for row in prepared:
+                evidence = _evidence_frame_for_hit(evidence_frames, row) if video is not None else None
+                if video is not None and evidence is None:
+                    continue
+                matches.append(_serialize_match(row, evidence))
+                if evidence is not None and all(item["frame_id"] != evidence["frame_id"] for item in frames):
+                    frames.append(public_frame(evidence))
+            insufficient = not frames if video is not None else not matches
+            if insufficient:
+                matches = []
+                frames = []
+                answer = "Insufficient evidence found for this query."
+                if not query_message:
+                    query_message = answer
+            else:
+                answer = f'Found {len(frames)} evidence frame(s) for "{query}".'
+                if not query_message:
+                    query_message = answer
+            return {
+                "ok": True,
+                "query": query,
+                "answer": answer,
+                "video_id": video_id,
+                "frames": frames,
+                "matches": matches,
+                "insufficient_evidence": insufficient,
+                "query_plan": query_plan,
+                "message": query_message,
+                "verification_mode": mode,
+                "verification_label": _verification_label(mode),
+                "warning": _verification_warning(mode),
+            }, 200
 
     @app.get("/")
     def index():
@@ -145,6 +344,134 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
         if not path.exists() or path.suffix.lower() != ".mp4":
             abort(404)
         return send_file(path, mimetype="video/mp4", conditional=True)
+
+    @app.post("/api/videos/upload")
+    def api_video_upload():
+        target = None
+        try:
+            upload = request.files.get("video")
+            if upload is not None:
+                filename = secure_filename(upload.filename or "upload.mp4")
+                if not filename.lower().endswith(".mp4"):
+                    return jsonify({"ok": False, "message": "Only MP4 uploads are supported."}), 400
+                target = UPLOAD_DIR / f"{uuid4().hex}_{filename}"
+                upload.save(target)
+                video, job = register_video(target, filename, None)
+            else:
+                data = request.get_json(silent=True) or {}
+                sample_name = Path(str(data.get("sample", ""))).name
+                sample_path = ROOT / "sample_videos" / sample_name
+                if not sample_name or not sample_path.is_file() or sample_path.suffix.lower() != ".mp4":
+                    return jsonify({"ok": False, "message": "Choose a valid sample asset or upload an MP4 video."}), 400
+                video, job = register_video(sample_path, sample_name, f"/api/assets/{sample_name}")
+        except (OSError, ValueError) as exc:
+            if target is not None and target.exists():
+                target.unlink()
+            return jsonify({"ok": False, "message": str(exc)}), 400
+        launch_processing(video, job)
+        return jsonify({
+            "ok": True,
+            "video_id": video["video_id"],
+            "job_id": job["job_id"],
+            "status": "processing",
+            "filename": video["filename"],
+            "source_url": video["source_url"],
+            **video["metadata"],
+        }), 202
+
+    @app.get("/api/videos/<video_id>")
+    def api_video(video_id):
+        video = app.config["VIDEOS"].get(video_id)
+        if video is None:
+            abort(404)
+        return jsonify({
+            "ok": True,
+            "video_id": video["video_id"],
+            "job_id": video["job_id"],
+            "filename": video["filename"],
+            "status": video["status"],
+            "source_url": video["source_url"],
+            **video["metadata"],
+            "chunks": video["chunks"],
+            "frame_count_indexed": len(video["frames"]),
+            "processing": video.get("processing", {}),
+        })
+
+    @app.get("/api/videos/<video_id>/content")
+    def api_video_content(video_id):
+        video = app.config["VIDEOS"].get(video_id)
+        if video is None:
+            abort(404)
+        path = Path(video["_path"])
+        if not path.is_file():
+            abort(404)
+        return send_file(path, mimetype="video/mp4", conditional=True)
+
+    @app.get("/api/videos/<video_id>/status")
+    def api_video_status(video_id):
+        video = app.config["VIDEOS"].get(video_id)
+        if video is None:
+            abort(404)
+        job = app.config["JOBS"][video["job_id"]]
+        return jsonify({"ok": True, **public_job(job)})
+
+    @app.get("/api/videos/<video_id>/frames")
+    def api_video_frames(video_id):
+        video = app.config["VIDEOS"].get(video_id)
+        if video is None:
+            abort(404)
+        return jsonify({
+            "ok": True,
+            "video_id": video_id,
+            "status": video["status"],
+            "frames": [public_frame(frame) for frame in video["frames"]],
+        })
+
+    @app.get("/api/videos/<video_id>/frames/<frame_id>")
+    def api_video_frame(video_id, frame_id):
+        video = app.config["VIDEOS"].get(video_id)
+        if video is None:
+            abort(404)
+        frame = next((row for row in video["frames"] if row["frame_id"] == frame_id), None)
+        if frame is None:
+            abort(404)
+        return jsonify({"ok": True, **public_frame(frame)})
+
+    @app.get("/api/videos/<video_id>/frames/<frame_id>/image")
+    def api_video_frame_image(video_id, frame_id):
+        video = app.config["VIDEOS"].get(video_id)
+        if video is None:
+            abort(404)
+        frame = next((row for row in video["frames"] if row["frame_id"] == frame_id), None)
+        if frame is None:
+            abort(404)
+        image_path = Path(frame["_image_path"])
+        if not image_path.is_file():
+            abort(404)
+        return send_file(image_path, mimetype="image/jpeg", conditional=True)
+
+    @app.get("/api/jobs/<job_id>/events")
+    def api_job_events(job_id):
+        job = app.config["JOBS"].get(job_id)
+        if job is None:
+            abort(404)
+        try:
+            after = max(0, int(request.args.get("after", "0")))
+        except ValueError:
+            return jsonify({"ok": False, "message": "after must be an integer event ID."}), 400
+        events = [dict(event) for event in job["events"] if event["event_id"] > after]
+        return jsonify({"ok": True, "job_id": job_id, "status": job["status"], "events": events})
+
+    @app.post("/api/videos/<video_id>/query")
+    def api_video_query(video_id):
+        if video_id not in app.config["VIDEOS"]:
+            abort(404)
+        data = request.get_json(silent=True) or {}
+        try:
+            payload, status = execute_query(str(data.get("query", "")).strip(), video_id)
+            return jsonify(payload), status
+        except Exception as exc:
+            return jsonify({"ok": False, "message": str(exc)}), 500
 
     @app.post("/api/scan")
     def api_scan():
@@ -234,33 +561,12 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
 
     @app.post("/api/query")
     def api_query():
-        pipe = app.config["PIPELINE"]
         data = request.get_json(silent=True) or {}
         query = str(data.get("query", "")).strip()
-        if not pipe.idx:
-            return jsonify({"ok": False, "message": "Scan a video before searching."}), 400
-        if not query:
-            return jsonify({"ok": False, "message": "Enter a query before searching."}), 400
         try:
-            with app.config["LOCK"]:
-                hits = pipe.search(query, top_k=4)
-                rows = pipe.prepare_hits(hits, query)
-                app.config["LAST_QUERY"] = query
-                mode = pipe.verification_mode()
-                query_plan = pipe.last_query_plan if hasattr(pipe, "last_query_plan") else None
-                query_message = getattr(pipe, "last_query_message", "")
-                if not query_message and not rows:
-                    query_message = "No indexed evidence met the retrieval and verification thresholds for this query."
-                return jsonify({
-                    "ok": True,
-                    "query": query,
-                    "matches": [_serialize_match(row) for row in rows],
-                    "query_plan": query_plan,
-                    "message": query_message,
-                    "verification_mode": mode,
-                    "verification_label": _verification_label(mode),
-                    "warning": _verification_warning(mode),
-                })
+            active_video_id = app.config.get("ACTIVE_VIDEO_ID")
+            payload, status = execute_query(query, active_video_id)
+            return jsonify(payload), status
         except Exception as exc:
             return jsonify({"ok": False, "message": str(exc)}), 500
 

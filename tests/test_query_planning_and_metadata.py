@@ -1,7 +1,8 @@
 import numpy as np
 
-from visionguard.evidence_api.agents.planner import DeterministicQueryPlanner
 from visionguard.model_services.metadata_encoder import MetadataSearchEncoder
+from visionguard.search import DeterministicQueryPlanner
+from visionguard.video_pipeline.video_pipeline import VisionGuardPipeline
 
 
 def test_metadata_embeddings_are_nonzero_and_query_aligned():
@@ -16,30 +17,36 @@ def test_metadata_embeddings_are_nonzero_and_query_aligned():
         "appearances": ["blue person"],
         "detections": [{"name": "person", "color": "blue"}],
     })
-    query = encoder.encode_text("find the red vehicle")
+    query = encoder.encode_text("find the red car")
 
     assert np.linalg.norm(red_car) > 0.99
     assert np.linalg.norm(query) > 0.99
     assert float(red_car @ query) > float(blue_person @ query)
 
 
-def test_planner_resolves_human_language_to_detector_entities():
+def test_planner_does_not_use_a_finite_object_alias_table():
     plan = DeterministicQueryPlanner().plan(
         "show me someone carrying a bag",
         detector_labels=["person", "backpack", "handbag", "suitcase"],
     )
 
-    assert "person" in plan.entities
-    assert {"backpack", "handbag", "suitcase"}.issubset(set(plan.entities))
+    assert plan.entities == []
     assert plan.intent == "event_search"
     assert "visual_semantic" in plan.retrieval_routes
 
 
-def test_planner_requests_clarification_for_attribute_without_object():
+def test_planner_routes_open_attribute_description_without_guessing_an_object():
     plan = DeterministicQueryPlanner().plan("show me the yellow one")
 
-    assert plan.intent == "ambiguous"
-    assert plan.clarification
+    assert plan.entities == []
+    assert "visual_semantic" in plan.retrieval_routes
+
+
+def test_planner_discovers_custom_detector_label_and_generic_plural():
+    planner = DeterministicQueryPlanner()
+
+    assert planner.resolve_entities("find the forklift", ["forklift"]) == ["forklift"]
+    assert planner.resolve_entities("find the forklifts", ["forklift"]) == ["forklift"]
 
 
 def test_planner_routes_supported_track_event_without_semantic_guessing():
@@ -48,3 +55,57 @@ def test_planner_routes_supported_track_event_without_semantic_guessing():
     assert plan.entities == ["person"]
     assert "track_events" in plan.retrieval_routes
     assert "visual_semantic" not in plan.retrieval_routes
+
+
+def test_color_metadata_is_generated_for_a_runtime_discovered_class(tmp_path):
+    pipe = VisionGuardPipeline(out_dir=str(tmp_path / "output"))
+    frame = np.zeros((80, 80, 3), dtype=np.uint8)
+    frame[:, :] = (0, 0, 255)
+
+    tags = pipe._appearance_tags(frame, [{"name": "custom crate", "box": [5, 5, 75, 75]}])
+
+    assert "custom crate" in tags
+    assert "red custom crate" in tags
+
+
+def test_open_query_uses_bounded_visual_verification_when_configured(tmp_path):
+    pipe = VisionGuardPipeline(out_dir=str(tmp_path / "output"))
+    pipe.trk.names = lambda: {0: "known class"}
+    pipe.enc.fallback = True
+    pipe.ver.api_key = "configured-for-test"
+    pipe.ver._last_error = None
+    pipe.idx = {
+        "video": "test.mp4",
+        "meta": {"duration": 10.0, "sample_sec": 1.0},
+        "frames": [{
+            "frame_id": 0,
+            "ts": 2.0,
+            "frame_path": "frame.jpg",
+            "objects": ["known class"],
+            "tracks": [],
+            "appearances": [],
+        }],
+        "segments": [],
+    }
+
+    plan = pipe.plan_query("find an unfamiliar object near the doorway")
+    candidates = pipe._exhaustive_visual_candidates("find an unfamiliar object near the doorway")
+
+    assert plan["executable"] is True
+    assert "exhaustive_visual_verification" in plan["retrieval_routes"]
+    assert len(candidates) == 1
+    assert candidates[0]["retrieval_mode"] == "exhaustive_visual_verification"
+
+
+def test_detector_tracker_merge_preserves_untracked_runtime_classes(tmp_path):
+    pipe = VisionGuardPipeline(out_dir=str(tmp_path / "output"))
+    detections = [
+        {"box": [0, 0, 20, 20], "conf": 0.9, "cls": 1, "name": "moving class"},
+        {"box": [30, 30, 40, 40], "conf": 0.8, "cls": 2, "name": "static class"},
+    ]
+    tracks = [{"id": 7, "box": [0, 0, 20, 20], "conf": 0.88, "cls": 1, "name": "moving class"}]
+
+    merged = pipe._merge_detections_with_tracks(detections, tracks)
+
+    assert {row["name"] for row in merged} == {"moving class", "static class"}
+    assert next(row for row in merged if row["name"] == "moving class")["track_id"] == 7
