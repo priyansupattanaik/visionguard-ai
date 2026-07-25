@@ -1,5 +1,7 @@
 # Changelog
 
+> Path names below are historical. See `PROJECT_STRUCTURE.md` for the current repository layout.
+
 All notable changes to VisionGuard are documented in this file.
 
 ## [0.2.0] - 2026-07-22 — HOC-VideoRAG Upgrade

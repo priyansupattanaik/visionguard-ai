@@ -2,7 +2,7 @@ import os
 
 os.environ["VISION_GUARD_SKIP_WARMUP"] = "1"
 
-from flask_app import create_app
+from visionguard.web_app.server import create_app
 
 
 class DummyPipeline:
@@ -32,9 +32,9 @@ def make_client():
     return app.test_client()
 
 
-def test_flask_app_imports_without_launching_server():
+def test_web_app_factory_imports_without_launching_server():
     app = create_app(testing=True, start_warmup=False, pipeline=DummyPipeline())
-    assert app.name == "app.web.server"
+    assert app.name == "visionguard.web_app.server"
 
 
 def test_index_is_custom_html_without_gradio_markers():
@@ -95,7 +95,7 @@ def test_static_files_load():
     assert b"gradio" not in css.data.lower()
 
 
-def test_readme_documents_flask_entry_point():
+def test_readme_documents_primary_entry_point():
     with open("README.md", "r", encoding="utf-8") as fh:
         body = fh.read()
-    assert "python flask_app.py" in body
+    assert "run.py" in body

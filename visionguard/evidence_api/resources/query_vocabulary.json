@@ -1,0 +1,17 @@
+{
+  "objects": ["person", "people", "man", "woman", "human", "someone", "worker", "dog", "car", "vehicle", "truck", "bus", "motorcycle", "bicycle", "backpack", "bag", "suitcase", "handbag", "umbrella", "chair", "tv", "bottle", "laptop", "tie", "phone"],
+  "object_aliases": {
+    "person": ["person"], "people": ["person"], "man": ["person"], "woman": ["person"], "human": ["person"], "someone": ["person"], "worker": ["person"],
+    "car": ["car"], "cars": ["car"], "vehicle": ["car", "truck", "bus", "motorcycle"], "sedan": ["car"], "truck": ["truck"], "lorry": ["truck"], "bus": ["bus"],
+    "motorcycle": ["motorcycle"], "motorbike": ["motorcycle"], "scooter": ["motorcycle"], "bicycle": ["bicycle"], "bike": ["bicycle", "motorcycle"], "cycle": ["bicycle"],
+    "backpack": ["backpack"], "bag": ["backpack", "handbag", "suitcase"], "parcel": ["backpack", "handbag", "suitcase"], "package": ["backpack", "handbag", "suitcase"], "luggage": ["suitcase"], "purse": ["handbag"],
+    "umbrella": ["umbrella"], "parasol": ["umbrella"], "chair": ["chair"], "television": ["tv"], "tv": ["tv"], "bottle": ["bottle"], "laptop": ["laptop"], "tie": ["tie"], "phone": ["cell phone"], "mobile": ["cell phone"], "cell phone": ["cell phone"], "dog": ["dog"]
+  },
+  "attributes": ["red", "blue", "black", "white", "yellow", "green", "small", "large", "helmet"],
+  "events": ["enter", "entered", "entering", "exit", "exited", "exiting", "leave", "leaving", "approach", "approaching", "loiter", "loitering", "suspicious", "gather", "gathering", "crowd", "cross", "crossed", "carry", "carrying", "alarm", "interact", "park", "stop", "fall", "run", "running"],
+  "track_events": ["enter", "entered", "entering", "exit", "exited", "exiting", "leave", "leaving", "approach", "approaching", "loiter", "loitering", "suspicious", "gather", "gathering", "crowd"],
+  "temporal_markers": {"after": "after", "before": "before", "during": "during", "between": "between"},
+  "count_words": ["how", "count", "many"],
+  "speech_words": ["said", "speech"],
+  "stop_words": ["the", "a", "an", "did", "was", "what", "which", "show", "find", "locate", "give", "me", "every", "time", "where", "when", "is", "are", "wearing", "with", "in", "on", "at", "of", "to", "please"]
+}

@@ -1,7 +1,7 @@
 """Unit tests for vector index shape/dtype coercion."""
 import numpy as np
 
-from app.pipeline.vector_index import SegmentVectorIndex, _as_2d_float32
+from visionguard.video_pipeline.vector_index import SegmentVectorIndex, _as_2d_float32
 
 
 def test_as_2d_from_1d_vector():

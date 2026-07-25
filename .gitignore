@@ -2,6 +2,7 @@ __pycache__/
 .pycache_tmp/
 .yolo/
 output/
+.visionguard/
 yolo11n.pt
 yolo11s.pt
 yolo11m.pt
@@ -16,5 +17,8 @@ qa_screenshots/
 *.log
 .agents/
 .env
+configuration/provider_keys.env
+.models/
+.cache/
 .DS_Store
 Thumbs.db

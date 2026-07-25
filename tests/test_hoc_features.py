@@ -4,7 +4,7 @@ import sys
 
 os.environ["VISION_GUARD_SKIP_WARMUP"] = "1"
 
-from flask_app import create_app
+from visionguard.web_app.server import create_app
 
 
 class DummyPipeline:
@@ -212,11 +212,12 @@ def test_object_query_still_works():
     assert res.status_code == 200
     assert data["ok"] is True
     assert "matches" in data
+    assert "message" in data
 
 
 def test_query_serialization_includes_tracks():
     """Query response serialization should include track IDs."""
-    from flask_app import _serialize_match
+    from visionguard.web_app.server import _serialize_match
     row = {
         "label": "1. 1.00s",
         "start": 0.5,
