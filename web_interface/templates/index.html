@@ -66,7 +66,10 @@
             </div>
 
             <button id="scanButton" type="submit" class="btn btn--primary btn--full">
-              <span>Process video</span><div class="btn__loader"></div>
+              <span>Upload video</span><div class="btn__loader"></div>
+            </button>
+            <button id="indexButton" type="button" class="btn btn--secondary btn--full" disabled>
+              <span>Index uploaded video</span><div class="btn__loader"></div>
             </button>
             <div id="scanProgress" class="progress-bar" style="display:none">
               <div class="progress-bar__track"><div class="progress-bar__fill" id="scanProgressFill"></div></div>
@@ -79,10 +82,12 @@
         <section class="card workflow-card">
           <div class="section-heading">
             <span class="step-number">2</span>
-            <div><h2>Search evidence</h2><p>Search unlocks only after evidence is indexed.</p></div>
+            <div><h2>Index evidence</h2><p>Remove unchanged frames, collect metadata, then build vectors.</p></div>
           </div>
           <div class="card__body compact-body">
             <label for="queryInput" class="field-label">What should be visible?</label>
+            <label for="responseMode" class="field-label">Return</label>
+            <div class="select-wrap"><select id="responseMode" disabled><option value="both">Frames and answer</option><option value="frames">Frames only</option><option value="answer">Answer with timestamps</option></select></div>
             <div class="search-row">
               <input id="queryInput" type="text" placeholder="Process a video before searching" autocomplete="off" disabled>
               <button id="queryButton" type="button" class="btn btn--primary" disabled><span>Search</span></button>

@@ -68,6 +68,13 @@ class DeterministicQueryPlanner:
         self.events = set(vocabulary["events"])
         self.temporal_markers = vocabulary["temporal_markers"]
         self.count_words = set(vocabulary["count_words"])
+        self.entity_aliases = {
+            str(canonical).casefold(): {
+                " ".join(re.findall(r"[a-z0-9]+", str(alias).casefold()))
+                for alias in aliases
+            }
+            for canonical, aliases in vocabulary.get("entity_aliases", {}).items()
+        }
         self.speech_words = set(vocabulary["speech_words"])
         self.stop_words = set(vocabulary.get("stop_words", []))
         self.temporal_events = set(vocabulary.get("track_events", []))
@@ -96,6 +103,20 @@ class DeterministicQueryPlanner:
             canonical = str(label).strip().casefold()
             if canonical and any(f" {form} " in padded for form in self._label_forms(canonical)):
                 resolved.add(canonical)
+                continue
+            aliases = self.entity_aliases.get(canonical, set())
+            if aliases and any(f" {alias} " in padded for alias in aliases):
+                resolved.add(canonical)
+
+        # Category aliases deliberately resolve only labels that the detector
+        # actually supports. They turn a user request for "vehicles" into the
+        # concrete stored classes, without claiming the detector saw a generic
+        # vehicle class.
+        vehicle_aliases = self.entity_aliases.get("vehicle", set())
+        if vehicle_aliases and any(f" {alias} " in padded for alias in vehicle_aliases):
+            vehicle_classes = {"car", "truck", "bus", "motorcycle", "bicycle"}
+            supported = {str(label).strip().casefold() for label in detector_labels or ()}
+            resolved.update(vehicle_classes.intersection(supported))
         return sorted(resolved)
 
     def plan(self, query: str, detector_labels=()) -> QueryPlan:
@@ -117,6 +138,11 @@ class DeterministicQueryPlanner:
             recognized_words.update(name.split())
             for form in self._label_forms(name):
                 recognized_words.update(form.split())
+            for alias in self.entity_aliases.get(name, set()):
+                recognized_words.update(alias.split())
+        if set(entities).intersection({"car", "truck", "bus", "motorcycle", "bicycle"}):
+            for alias in self.entity_aliases.get("vehicle", set()):
+                recognized_words.update(alias.split())
         unknown_terms = sorted({word for word in words if word not in recognized_words})
 
         routes = []

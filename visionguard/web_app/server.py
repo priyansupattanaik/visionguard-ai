@@ -180,7 +180,7 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
             "video_id": video_id,
             "job_id": job_id,
             "filename": filename,
-            "status": "processing",
+            "status": "uploaded",
             "source_url": source_url or f"/api/videos/{video_id}/content",
             "metadata": metadata,
             "chunks": chunks,
@@ -207,7 +207,7 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                 with app.config["STATE_LOCK"]:
                     job["status"] = "running"
                     job["updated_at"] = utc_now()
-                for name in ("frames_extracted", "keyframes_selected", "objects_detected"):
+                for name in ("frames_extracted", "keyframes_selected", "duplicates_removed", "objects_detected", "frame_metadata_collected"):
                     set_job_stage(job, name, "running", total=video["metadata"]["frame_count"])
                 for event in pipe.index_video_iter(video["_path"]):
                     if event.get("kind") == "preview":
@@ -223,7 +223,10 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                                     video["updated_at"] = utc_now()
                         set_job_stage(job, "frames_extracted", "running", processed=processed, total=total, message=event.get("status", ""))
                         set_job_stage(job, "keyframes_selected", "running", processed=kept, total=total, message=f"{kept} useful frames selected so far.")
+                        deduplicated = max(0, processed - kept)
+                        set_job_stage(job, "duplicates_removed", "running", processed=deduplicated, total=processed, message=f"{deduplicated} sampled duplicate frames removed so far.")
                         set_job_stage(job, "objects_detected", "running", processed=processed, total=total, message=f"Detector processed frame {processed}; {detected} detections on the latest selected frame.")
+                        set_job_stage(job, "frame_metadata_collected", "running", processed=kept, total=total, message="Stored timestamp, detections, tracks, appearances, and motion for each evidence frame.")
                     elif event.get("kind") == "done":
                         meta = event["meta"]
                         frames = materialize_frames(video_id, pipe)
@@ -235,7 +238,11 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                             raise RuntimeError(f"Only {vector_count} of {len(frames)} evidence frames have searchable vectors.")
                         set_job_stage(job, "frames_extracted", "completed", processed=len(frames), total=len(frames), message=f"{len(frames)} real frame images written.")
                         set_job_stage(job, "keyframes_selected", "completed", processed=len(frames), total=len(frames), message="Frames selected using sampling, motion, content, and object-change rules.")
+                        removed_duplicates = int(meta.get("skipped_static_frames", 0))
+                        sampled_frames = int(meta.get("sampled_frames", len(frames) + removed_duplicates))
+                        set_job_stage(job, "duplicates_removed", "completed", processed=removed_duplicates, total=sampled_frames, message=f"Removed {removed_duplicates} unchanged sampled frames; retained {len(frames)} evidence frames.")
                         set_job_stage(job, "objects_detected", "completed", processed=len(frames), total=len(frames), message=f"YOLO processed {len(frames)} frames and stored {detection_count} detections.")
+                        set_job_stage(job, "frame_metadata_collected", "completed", processed=len(frames), total=len(frames), message="Each evidence frame has its decoder timestamp, detections, tracks, appearances, and motion metadata.")
                         set_job_stage(job, "embeddings_generated", "completed", processed=vector_count, total=len(frames), message=f"{meta.get('embedding_mode', 'unknown')} produced nonzero vectors for every evidence frame.")
                         set_job_stage(job, "vector_index_updated", "completed", processed=len(frames), total=len(frames), message=f"Frame and segment indexes stored with backend {meta.get('retriever', 'unknown')}.")
                         set_job_stage(job, "query_ready", "completed", processed=1, total=1, message="Search is enabled because evidence frames and indexes exist.")
@@ -268,11 +275,15 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                         update_stage(job, stage["name"], "skipped", message="Not run because processing failed.")
 
     def launch_processing(video, job):
+        existing = app.config["PROCESS_THREADS"].get(job["job_id"])
+        if existing is not None and existing.is_alive():
+            return False
         worker = threading.Thread(target=process_video, args=(video["video_id"], job["job_id"]), daemon=True)
         app.config["PROCESS_THREADS"][job["job_id"]] = worker
         worker.start()
+        return True
 
-    def execute_query(query, video_id=None):
+    def execute_query(query, video_id=None, response_mode="both"):
         pipe = app.config["PIPELINE"]
         video = app.config["VIDEOS"].get(video_id) if video_id else None
         if video is not None:
@@ -314,13 +325,35 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                 answer = f'Found {len(frames)} evidence frame(s) for "{query}".'
                 if not query_message:
                     query_message = answer
+            response_mode = response_mode if response_mode in {"both", "frames", "answer"} else "both"
+            citations = [
+                {
+                    "timestamp_ms": frame["timestamp_ms"],
+                    "frame_id": frame["frame_id"],
+                    "objects": frame.get("objects", []),
+                }
+                for frame in frames
+            ]
+            if not insufficient:
+                evidence_lines = []
+                for citation in citations:
+                    seconds = citation["timestamp_ms"] / 1000.0
+                    minutes, remainder = divmod(seconds, 60)
+                    hours, minutes = divmod(int(minutes), 60)
+                    object_text = ", ".join(citation["objects"]) or "no detector-labelled objects"
+                    evidence_lines.append(f"{hours:02d}:{minutes:02d}:{remainder:06.3f} (frame {citation['frame_id']}): {object_text}.")
+                answer = f'Evidence for "{query}": ' + " ".join(evidence_lines)
+            public_frames = frames if response_mode in {"both", "frames"} else []
+            public_matches = matches if response_mode in {"both", "frames"} else []
             return {
                 "ok": True,
                 "query": query,
                 "answer": answer,
                 "video_id": video_id,
-                "frames": frames,
-                "matches": matches,
+                "response_mode": response_mode,
+                "frames": public_frames,
+                "matches": public_matches,
+                "citations": citations,
                 "insufficient_evidence": insufficient,
                 "query_plan": query_plan,
                 "message": query_message,
@@ -385,16 +418,33 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
             if target is not None and target.exists():
                 target.unlink()
             return jsonify({"ok": False, "message": str(exc)}), 400
-        launch_processing(video, job)
         return jsonify({
             "ok": True,
             "video_id": video["video_id"],
             "job_id": job["job_id"],
-            "status": "processing",
+            "status": "uploaded",
             "filename": video["filename"],
             "source_url": video["source_url"],
             **video["metadata"],
-        }), 202
+        }), 201
+
+    @app.post("/api/videos/<video_id>/index")
+    def api_video_index(video_id):
+        video = app.config["VIDEOS"].get(video_id)
+        if video is None:
+            abort(404)
+        job = app.config["JOBS"][video["job_id"]]
+        with app.config["STATE_LOCK"]:
+            if job["status"] == "completed":
+                return jsonify({"ok": True, "video_id": video_id, "job_id": job["job_id"], "status": "completed", "message": "This video is already indexed."})
+            if job["status"] == "running":
+                return jsonify({"ok": True, "video_id": video_id, "job_id": job["job_id"], "status": "processing", "message": "Indexing is already in progress."}), 202
+            video["status"] = "processing"
+            video["updated_at"] = utc_now()
+            job["status"] = "running"
+            job["updated_at"] = utc_now()
+        launch_processing(video, job)
+        return jsonify({"ok": True, "video_id": video_id, "job_id": job["job_id"], "status": "processing", "message": "Indexing started."}), 202
 
     @app.get("/api/videos/<video_id>")
     def api_video(video_id):
@@ -494,7 +544,7 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
             abort(404)
         data = request.get_json(silent=True) or {}
         try:
-            payload, status = execute_query(str(data.get("query", "")).strip(), video_id)
+            payload, status = execute_query(str(data.get("query", "")).strip(), video_id, str(data.get("response_mode", "both")))
             return jsonify(payload), status
         except Exception as exc:
             return jsonify({"ok": False, "message": str(exc)}), 500
@@ -591,7 +641,7 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
         query = str(data.get("query", "")).strip()
         try:
             active_video_id = app.config.get("ACTIVE_VIDEO_ID")
-            payload, status = execute_query(query, active_video_id)
+            payload, status = execute_query(query, active_video_id, str(data.get("response_mode", "both")))
             return jsonify(payload), status
         except Exception as exc:
             return jsonify({"ok": False, "message": str(exc)}), 500

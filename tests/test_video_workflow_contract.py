@@ -115,16 +115,24 @@ def test_video_job_frame_and_query_contract(tmp_path):
     client = app.test_client()
 
     upload = client.post("/api/videos/upload", json={"sample": "asset3.mp4"})
-    assert upload.status_code == 202
+    assert upload.status_code == 201
     identifiers = upload.get_json()
     assert identifiers["video_id"].startswith("video_")
     assert identifiers["job_id"].startswith("job_")
+    assert identifiers["status"] == "uploaded"
+
+    before_index = client.get(f"/api/videos/{identifiers['video_id']}/status").get_json()
+    assert before_index["status"] == "waiting"
+    indexed = client.post(f"/api/videos/{identifiers['video_id']}/index")
+    assert indexed.status_code == 202
 
     app.config["PROCESS_THREADS"][identifiers["job_id"]].join(timeout=5)
     status = client.get(f"/api/videos/{identifiers['video_id']}/status").get_json()
     assert status["status"] == "completed"
     by_name = {row["name"]: row for row in status["stages"]}
     assert by_name["query_ready"]["status"] == "completed"
+    assert by_name["duplicates_removed"]["status"] == "completed"
+    assert by_name["frame_metadata_collected"]["status"] == "completed"
     assert by_name["ocr_completed"]["status"] == "skipped"
     assert by_name["captions_generated"]["status"] == "skipped"
 
@@ -136,6 +144,16 @@ def test_video_job_frame_and_query_contract(tmp_path):
     found = client.post(f"/api/videos/{identifiers['video_id']}/query", json={"query": "find test class"}).get_json()
     assert found["insufficient_evidence"] is False
     assert found["frames"][0]["frame_id"] == frames[0]["frame_id"]
+    assert "00:00:00.000" in found["answer"]
+    assert found["citations"][0]["timestamp_ms"] == 0
+
+    answer_only = client.post(
+        f"/api/videos/{identifiers['video_id']}/query",
+        json={"query": "find test class", "response_mode": "answer"},
+    ).get_json()
+    assert answer_only["frames"] == []
+    assert answer_only["matches"] == []
+    assert "00:00:00.000" in answer_only["answer"]
 
     absent = client.post(f"/api/videos/{identifiers['video_id']}/query", json={"query": "absent object"}).get_json()
     assert absent["insufficient_evidence"] is True

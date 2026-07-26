@@ -58,6 +58,13 @@ def test_planner_routes_supported_track_event_without_semantic_guessing():
     assert "visual_semantic" not in plan.retrieval_routes
 
 
+def test_planner_resolves_common_aliases_to_supported_detector_classes():
+    planner = DeterministicQueryPlanner()
+
+    assert planner.resolve_entities("show pedestrians", ["person", "car"]) == ["person"]
+    assert planner.resolve_entities("find vehicles", ["person", "car", "truck", "motorcycle"]) == ["car", "motorcycle", "truck"]
+
+
 def test_color_metadata_is_generated_for_a_runtime_discovered_class(tmp_path):
     pipe = VisionGuardPipeline(out_dir=str(tmp_path / "output"))
     pipe.model_provider = NoneModelProvider()

@@ -902,7 +902,9 @@ class VisionGuardPipeline:
                     continue
                 detection_started = time.perf_counter()
                 tracked_dets = self.trk.track_frame(frame, frame_idx=i, ts=ts, cls=None)
-                raw_dets = self.trk.detect(frame, cls=None, conf=0.18)
+                # Honour YOLO_CONF for stored evidence. A fixed override here
+                # made the deployed sensitivity setting ineffective.
+                raw_dets = self.trk.detect(frame, cls=None)
                 detections = self._merge_detections_with_tracks(raw_dets, tracked_dets)
                 track_ids = [det["id"] for det in tracked_dets if "id" in det]
                 timings["detection_tracking"] += time.perf_counter() - detection_started
@@ -1046,6 +1048,7 @@ class VisionGuardPipeline:
             "sample_sec": sample_sec,
             "win_sec": win_sec,
             "segments": len(segs),
+            "sampled_frames": total_samples,
             "kept_frames": kept_frames,
             "skipped_static_frames": skipped_static,
             "skipped_empty_frames": skipped_empty,

@@ -21,6 +21,7 @@
     videoUpload: $("#videoUpload"),
     scanForm: $("#scanForm"),
     scanButton: $("#scanButton"),
+    indexButton: $("#indexButton"),
     scanStatus: $("#scanStatus"),
     scanProgress: $("#scanProgress"),
     scanProgressFill: $("#scanProgressFill"),
@@ -35,6 +36,7 @@
     inspectorTimestamp: $("#inspectorTimestamp"),
     inspectorDetails: $("#inspectorDetails"),
     queryInput: $("#queryInput"),
+    responseMode: $("#responseMode"),
     queryButton: $("#queryButton"),
     queryStatus: $("#queryStatus"),
     verificationStatus: $("#verificationStatus"),
@@ -92,6 +94,7 @@
       els.queryInput.placeholder = ready ? "Describe the visible object or event to find" : "Process a video before searching";
     }
     if (els.queryButton) els.queryButton.disabled = !ready;
+    if (els.responseMode) els.responseMode.disabled = !ready;
   }
 
   function setVerification(label, warning = "") {
@@ -359,14 +362,31 @@
       state.videoId = upload.video_id;
       state.jobId = upload.job_id;
       showVideoPreview(upload.source_url, upload.filename);
-      setMessage(els.scanStatus, `${upload.filename}: ${upload.width}×${upload.height}, ${upload.fps} FPS, ${(upload.duration_ms / 1000).toFixed(2)}s. Processing started.`, "scanning");
+      if (els.indexButton) els.indexButton.disabled = false;
+      setMessage(els.scanStatus, "Upload complete. Review the video, then start evidence indexing.", "success");
+      showProgress(0, "Upload complete — ready to index");
+    } catch (error) {
+      setMessage(els.scanStatus, error.message, "error");
+      showToast(error.message, "error");
+    } finally {
+      setButtonLoading(els.scanButton, false);
+    }
+  }
+
+  async function startIndexing() {
+    if (!state.videoId) return;
+    setSearchReady(false);
+    setButtonLoading(els.indexButton, true);
+    setMessage(els.scanStatus, "Starting evidence indexing.", "scanning");
+    try {
+      await fetchJson(`/api/videos/${state.videoId}/index`, { method: "POST" });
       await pollProcessing();
       await loadStatus();
     } catch (error) {
       setMessage(els.scanStatus, error.message, "error");
       showToast(error.message, "error");
     } finally {
-      setButtonLoading(els.scanButton, false);
+      setButtonLoading(els.indexButton, false);
     }
   }
 
@@ -418,7 +438,8 @@
     state.query = query;
     setButtonLoading(els.queryButton, true);
     try {
-      const data = await fetchJson(`/api/videos/${state.videoId}/query`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query }) });
+      const response_mode = els.responseMode?.value || "both";
+      const data = await fetchJson(`/api/videos/${state.videoId}/query`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, response_mode }) });
       renderMatches(data.matches);
       setMessage(els.queryStatus, data.answer, data.insufficient_evidence ? "warn" : "success");
       setVerification(data.verification_label, data.warning);
@@ -482,6 +503,7 @@
   }
 
   els.scanForm?.addEventListener("submit", submitVideo);
+  els.indexButton?.addEventListener("click", startIndexing);
   els.queryButton?.addEventListener("click", runQuery);
   els.queryInput?.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); runQuery(); } });
   els.exportButton?.addEventListener("click", runExport);
