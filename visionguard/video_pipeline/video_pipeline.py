@@ -155,20 +155,6 @@ class VisionGuardPipeline:
     def _clip_name(self, i, kind):
         return f"match_{i:02d}_{kind}"
 
-    def _iou(self, a, b):
-        ax1, ay1, ax2, ay2 = a
-        bx1, by1, bx2, by2 = b
-        x1 = max(ax1, bx1)
-        y1 = max(ay1, by1)
-        x2 = min(ax2, bx2)
-        y2 = min(ay2, by2)
-        if x2 <= x1 or y2 <= y1:
-            return 0.0
-        inter = (x2 - x1) * (y2 - y1)
-        aa = max(1.0, (ax2 - ax1) * (ay2 - ay1))
-        bb = max(1.0, (bx2 - bx1) * (by2 - by1))
-        return inter / (aa + bb - inter)
-
     def _new_run(self, video):
         name = os.path.splitext(os.path.basename(video))[0]
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -181,10 +167,6 @@ class VisionGuardPipeline:
         self.rep = ReportGenerator(os.path.join(self.run_dir, "reports"))
         self.raw_jobs = {}
         self.seg_jobs = {}
-
-    def _cos(self, a, b):
-        den = float(np.linalg.norm(a) * np.linalg.norm(b))
-        return 0.0 if den == 0 else float(np.dot(a, b) / den)
 
     def _preview(self, frame, tracks, ts):
         out = frame.copy()
@@ -1163,6 +1145,7 @@ class VisionGuardPipeline:
         if not refresh and cached is not None and time.monotonic() - checked_at < 5.0:
             return cached
         snapshot = model_health_snapshot(self.model_provider)
+        snapshot["detector"] = self.trk.model_status()
         self._model_health_cache = (time.monotonic(), snapshot)
         return snapshot
 

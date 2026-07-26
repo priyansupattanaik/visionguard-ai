@@ -9,6 +9,7 @@
     frames: [],
     lastEventId: 0,
     searchable: false,
+    detectorReady: true,
   };
 
   const $ = (selector) => document.querySelector(selector);
@@ -121,6 +122,8 @@
       if (els.providerName) els.providerName.textContent = providerLabel(data.selected_provider);
       const textModel = data.text_model || {};
       const visionModel = data.vision_model || {};
+      const detector = data.detector || {};
+      state.detectorReady = detector.ready !== false;
       setCapability(
         els.textModelStatus,
         textModel.reachable ? "Connected" : (textModel.configured ? "Disconnected" : "Disabled"),
@@ -134,7 +137,9 @@
       if (els.nvidiaStatus) els.nvidiaStatus.textContent = data.external_providers?.nvidia || "disabled";
       if (els.groqStatus) els.groqStatus.textContent = data.external_providers?.groq || "disabled";
       if (els.modelNotice) {
-        els.modelNotice.textContent = textModel.reachable
+        els.modelNotice.textContent = !state.detectorReady
+          ? (detector.message || "The local YOLO detector is unavailable. Run scripts\\bootstrap_models.py before indexing.")
+          : textModel.reachable
           ? `${providerLabel(data.selected_provider)} text reasoning is connected. Evidence rules remain enforced by the backend.`
           : `${textModel.message || "The selected text model is unavailable"} Video upload, frame extraction, and detector-backed object search remain available.`;
       }
@@ -362,8 +367,14 @@
       state.videoId = upload.video_id;
       state.jobId = upload.job_id;
       showVideoPreview(upload.source_url, upload.filename);
-      if (els.indexButton) els.indexButton.disabled = false;
-      setMessage(els.scanStatus, "Upload complete. Review the video, then start evidence indexing.", "success");
+      if (els.indexButton) els.indexButton.disabled = !state.detectorReady;
+      setMessage(
+        els.scanStatus,
+        state.detectorReady
+          ? "Upload complete. Review the video, then start evidence indexing."
+          : "Upload complete, but indexing is unavailable until the local YOLO model is bootstrapped.",
+        state.detectorReady ? "success" : "error",
+      );
       showProgress(0, "Upload complete — ready to index");
     } catch (error) {
       setMessage(els.scanStatus, error.message, "error");
@@ -441,7 +452,8 @@
       const response_mode = els.responseMode?.value || "both";
       const data = await fetchJson(`/api/videos/${state.videoId}/query`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query, response_mode }) });
       renderMatches(data.matches);
-      setMessage(els.queryStatus, data.answer, data.insufficient_evidence ? "warn" : "success");
+      const displayText = data.response_mode === "frames" && !data.insufficient_evidence ? data.message : data.answer;
+      setMessage(els.queryStatus, displayText, data.insufficient_evidence ? "warn" : "success");
       setVerification(data.verification_label, data.warning);
       if (!data.insufficient_evidence && data.frames.length) inspectFrame(data.frames[0], false);
     } catch (error) {

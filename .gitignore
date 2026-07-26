@@ -22,3 +22,9 @@ configuration/provider_keys.env
 .cache/
 .DS_Store
 Thumbs.db
+.ipynb_checkpoints/
+*.tmp
+*.bak
+*.swp
+*.swo
+*.thumb

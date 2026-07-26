@@ -155,6 +155,14 @@ def test_video_job_frame_and_query_contract(tmp_path):
     assert answer_only["matches"] == []
     assert "00:00:00.000" in answer_only["answer"]
 
+    frames_only = client.post(
+        f"/api/videos/{identifiers['video_id']}/query",
+        json={"query": "find test class", "response_mode": "frames"},
+    ).get_json()
+    assert frames_only["answer"] == ""
+    assert len(frames_only["frames"]) == 1
+    assert len(frames_only["matches"]) == 1
+
     absent = client.post(f"/api/videos/{identifiers['video_id']}/query", json={"query": "absent object"}).get_json()
     assert absent["insufficient_evidence"] is True
     assert absent["frames"] == []

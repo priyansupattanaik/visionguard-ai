@@ -21,6 +21,7 @@ class DummyPipeline:
             "selected_provider": "llama_cpp",
             "text_model": {"configured": True, "reachable": False, "url": "http://127.0.0.1:8080", "message": "not reachable"},
             "vision_model": {"configured": True, "reachable": False, "url": "http://127.0.0.1:8081", "message": "not reachable"},
+            "detector": {"ready": True, "model": "yolo11m.pt", "message": "available"},
             "external_providers": {"nvidia": "disabled", "groq": "disabled"},
         }
 
@@ -83,6 +84,28 @@ def test_model_health_reports_selected_local_provider_without_blocking_video_bac
     assert data["selected_provider"] == "llama_cpp"
     assert data["text_model"]["reachable"] is False
     assert data["external_providers"] == {"nvidia": "disabled", "groq": "disabled"}
+
+
+def test_indexing_is_rejected_before_a_missing_detector_can_create_a_failed_job():
+    class MissingDetectorPipeline(DummyPipeline):
+        def model_health(self, refresh=False):
+            health = super().model_health(refresh=refresh)
+            health["detector"] = {
+                "ready": False,
+                "model": "yolo11m.pt",
+                "message": "YOLO model 'yolo11m.pt' is missing from '.models'. Run scripts/bootstrap_models.py before indexing a video.",
+            }
+            return health
+
+    app = create_app(testing=True, start_warmup=False, pipeline=MissingDetectorPipeline())
+    client = app.test_client()
+    uploaded = client.post("/api/videos/upload", json={"sample": "asset3.mp4"}).get_json()
+
+    response = client.post(f"/api/videos/{uploaded['video_id']}/index")
+
+    assert response.status_code == 409
+    assert "bootstrap_models.py" in response.get_json()["message"]
+    assert client.get(f"/api/videos/{uploaded['video_id']}/status").get_json()["status"] == "waiting"
 
 
 def test_query_before_scan_returns_controlled_error():

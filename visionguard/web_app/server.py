@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import threading
 from pathlib import Path
@@ -28,6 +29,7 @@ load_project_env(ROOT)
 OUTPUT_DIR = Path(os.getenv("VISION_GUARD_OUT_DIR", str(ROOT / "output")))
 UPLOAD_DIR = OUTPUT_DIR / "uploads"
 DOWNLOADS = {}
+logger = logging.getLogger(__name__)
 
 
 def _asset_rows():
@@ -298,6 +300,7 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
             return {"ok": False, "message": "Scan a video before searching."}, 400
         if not query:
             return {"ok": False, "message": "Enter a query before searching."}, 400
+        response_mode = response_mode if response_mode in {"both", "frames", "answer"} else "both"
         with app.config["LOCK"]:
             hits = pipe.search(query, top_k=4)
             prepared = pipe.prepare_hits(hits, query)
@@ -325,7 +328,6 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                 answer = f'Found {len(frames)} evidence frame(s) for "{query}".'
                 if not query_message:
                     query_message = answer
-            response_mode = response_mode if response_mode in {"both", "frames", "answer"} else "both"
             citations = [
                 {
                     "timestamp_ms": frame["timestamp_ms"],
@@ -343,6 +345,9 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                     object_text = ", ".join(citation["objects"]) or "no detector-labelled objects"
                     evidence_lines.append(f"{hours:02d}:{minutes:02d}:{remainder:06.3f} (frame {citation['frame_id']}): {object_text}.")
                 answer = f'Evidence for "{query}": ' + " ".join(evidence_lines)
+                if response_mode == "frames":
+                    answer = ""
+                    query_message = f'Found {len(frames)} evidence frame(s) for "{query}".'
             public_frames = frames if response_mode in {"both", "frames"} else []
             public_matches = matches if response_mode in {"both", "frames"} else []
             return {
@@ -433,6 +438,14 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
         video = app.config["VIDEOS"].get(video_id)
         if video is None:
             abort(404)
+        pipe = app.config["PIPELINE"]
+        if hasattr(pipe, "model_health"):
+            detector = pipe.model_health(refresh=True).get("detector", {})
+            if detector and not detector.get("ready", False):
+                return jsonify({
+                    "ok": False,
+                    "message": detector.get("message", "The local YOLO detector is not ready. Bootstrap it before indexing."),
+                }), 409
         job = app.config["JOBS"][video["job_id"]]
         with app.config["STATE_LOCK"]:
             if job["status"] == "completed":
@@ -698,5 +711,5 @@ app = create_app(start_warmup=os.getenv("VISION_GUARD_SKIP_WARMUP") != "1")
 if __name__ == "__main__":
     host = os.getenv("VISION_GUARD_HOST", "127.0.0.1")
     port = int(os.getenv("VISION_GUARD_PORT", "7860"))
-    print(f"Open Vision Guard at http://{host}:{port}")
+    logger.info("Starting VisionGuard at http://%s:%s", host, port)
     app.run(host=host, port=port, debug=False, threaded=True)

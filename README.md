@@ -63,4 +63,4 @@ Run the real local workflow check:
 
 Tracked content is limited to source, tests, documentation, configuration templates, evaluation schemas, and bundled sample videos. `.models/`, `.cache/`, `output/`, virtual environments, frame dumps, indexes, logs, and test caches are intentionally ignored and can be recreated.
 
-See `documentation/ARCHITECTURE.md`, `documentation/API.md`, and `evaluation/README.md` for the detailed contracts and limitations.
+See `documentation/PROJECT_MAP.md` for the codebase map, `documentation/PROJECT_FLOW.md` for the canonical operational flow, `documentation/ARCHITECTURE.md` for boundaries, and `documentation/API.md` for the HTTP contract.

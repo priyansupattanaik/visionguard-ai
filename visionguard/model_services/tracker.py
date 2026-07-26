@@ -42,6 +42,14 @@ class ObjectTracker:
             "Run scripts/bootstrap_models.py before indexing a video."
         )
 
+    def model_status(self) -> dict:
+        """Report local detector readiness without loading model weights."""
+        try:
+            path = self._cached_model_path()
+        except FileNotFoundError as exc:
+            return {"ready": False, "model": self.model_name, "message": str(exc)}
+        return {"ready": True, "model": self.model_name, "path": path, "message": "Local YOLO model is available."}
+
     def load(self):
         if self.m is not None:
             return
