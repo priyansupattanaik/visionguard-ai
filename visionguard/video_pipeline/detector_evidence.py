@@ -34,7 +34,7 @@ class DetectorEvidenceRetriever:
             return []
         observations.sort(key=lambda row: row["ts"])
         meta = index.get("meta", {})
-        gap_sec = max(float(meta.get("win_sec", 0.0)), float(meta.get("sample_sec", 1.0)) * 1.25, 1.0)
+        gap_sec = max(float(meta.get("win_sec", 0.0)), float(meta.get("frame_interval_sec", 1.0)) * 1.25, 1.0)
         groups = [[observations[0]]]
         for observation in observations[1:]:
             if observation["ts"] - groups[-1][-1]["ts"] <= gap_sec:

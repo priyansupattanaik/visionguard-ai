@@ -87,7 +87,7 @@ def test_open_query_uses_bounded_visual_verification_when_configured(tmp_path, m
     pipe.ver.warmup()
     pipe.idx = {
         "video": "test.mp4",
-        "meta": {"duration": 10.0, "sample_sec": 1.0},
+        "meta": {"duration": 10.0, "frame_interval_sec": 0.04},
         "frames": [{
             "frame_id": 0,
             "ts": 2.0,
@@ -129,7 +129,7 @@ def test_detector_retrieval_returns_a_calibrated_evidence_segment(tmp_path, monk
     pipe._q_objs = lambda query: ["car"]
     pipe._query_colors = lambda query: []
     pipe.idx = {
-        "meta": {"duration": 12.0, "sample_sec": 1.0, "win_sec": 3.0},
+        "meta": {"duration": 12.0, "frame_interval_sec": 0.04, "win_sec": 3.0},
         "frames": [
             {"frame_id": 1, "ts": 2.0, "frame_path": "first.jpg", "objects": ["car"], "tracks": [1], "appearances": [], "detections": [{"name": "car", "cls": 2, "box": [0, 0, 5, 5], "conf": 0.8}]},
             {"frame_id": 2, "ts": 4.0, "frame_path": "second.jpg", "objects": ["car"], "tracks": [1], "appearances": [], "detections": [{"name": "car", "cls": 2, "box": [0, 0, 5, 5], "conf": 0.9}]},
@@ -141,6 +141,6 @@ def test_detector_retrieval_returns_a_calibrated_evidence_segment(tmp_path, monk
 
     assert len(hits) == 2
     assert hits[0]["peak_ts"] == 4.0
-    assert hits[0]["start"] == 1.0
-    assert hits[0]["end"] == 5.0
+    assert hits[0]["start"] == 1.96
+    assert hits[0]["end"] == 4.04
     assert hits[0]["cache_key"].startswith("detector-segment:")

@@ -208,7 +208,7 @@ class LlamaCppProvider(OpenAICompatibleProvider):
 
 
 def create_model_provider(provider_name=None, opener=None):
-    selected = (provider_name or os.getenv("MODEL_PROVIDER", "llama_cpp")).strip().casefold()
+    selected = (provider_name or os.getenv("MODEL_PROVIDER", "none")).strip().casefold()
     if selected == "llama_cpp":
         return LlamaCppProvider(opener=opener)
     if selected == "nvidia":

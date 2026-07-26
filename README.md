@@ -7,12 +7,12 @@ VisionGuard is a local-first CCTV evidence retrieval system. It turns a video in
 The operational path is deterministic:
 
 ```text
-ingest → decode/sample → deduplicate → detect → track → evidence segments
+ingest → decode every frame → exact consecutive deduplication → detect → track → evidence segments
       → embeddings/indexes → intent routing → retrieval → optional verification
       → timestamped frame/clip export
 ```
 
-Each indexed frame retains its decoder timestamp, source frame number, detector boxes, confidences, track IDs, appearance tags, and selection reason. Retrieval produces an evidence interval with a representative source frame. An answer is generated only from these stored records.
+Each decoded frame is examined in source order. A frame is removed only when every pixel matches the immediately preceding decoded frame; no fixed-second sampling, motion threshold, empty-frame suppression, or forced keyframe interval is used. Each retained frame keeps its decoder timestamp, source frame number, detector boxes, confidences, track IDs, and appearance tags.
 
 ## Modes
 

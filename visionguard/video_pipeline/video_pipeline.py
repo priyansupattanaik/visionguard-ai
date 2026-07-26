@@ -25,6 +25,7 @@ from visionguard.model_services.tracker import ObjectTracker
 from visionguard.video_pipeline.vector_index import SegmentVectorIndex, _as_2d_float32
 from visionguard.video_pipeline.video_reader import DecordVideoReader
 from visionguard.video_pipeline.detector_evidence import DetectorEvidenceRetriever
+from visionguard.video_pipeline.frame_dedup import is_exact_duplicate
 from visionguard.model_services.vlm import SearchEncoder
 from visionguard.search import DeterministicQueryPlanner
 
@@ -194,38 +195,6 @@ class VisionGuardPipeline:
         cv2.putText(out, f"{ts:.1f}s", (18, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2, cv2.LINE_AA)
         return cv2.cvtColor(out, cv2.COLOR_BGR2RGB)
 
-    def _is_non_content_frame(self, frame, tracks):
-        if tracks:
-            return False
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        mean = float(gray.mean())
-        std = float(gray.std())
-        edges = cv2.Canny(gray, 80, 160)
-        edge_ratio = float((edges > 0).mean())
-        return mean < 40.0 and std < 28.0 and edge_ratio < 0.025
-
-    def _cheap_signature(self, frame, size=(64, 36)):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        small = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
-        return cv2.GaussianBlur(small, (3, 3), 0)
-
-    def _frame_diff_score(self, sig_a, sig_b):
-        if sig_a is None or sig_b is None:
-            return 1.0
-        diff = cv2.absdiff(sig_a, sig_b)
-        return float(diff.mean() / 255.0)
-
-    def _is_interesting_frame(self, frame, prev_sig, ts, last_keep_ts, min_motion=0.025, force_keep_gap=4.0):
-        sig = self._cheap_signature(frame)
-        if prev_sig is None:
-            return True, sig, 1.0, "first"
-        score = self._frame_diff_score(sig, prev_sig)
-        if score >= min_motion:
-            return True, sig, score, "motion"
-        if last_keep_ts is None or (ts - last_keep_ts) >= force_keep_gap:
-            return True, sig, score, "forced_gap"
-        return False, sig, score, "duplicate"
-
     def _q_objs(self, q):
         try:
             detector_labels = self.trk.names().values()
@@ -389,10 +358,10 @@ class VisionGuardPipeline:
 
     def _frame_summary(self, q, peak_ts, objs):
         label = ", ".join(objs) if objs else "no tracked objects"
-        return f"best matching sampled frame at {peak_ts:.2f}s | detected: {label}"
+        return f"best matching indexed frame at {peak_ts:.2f}s | detected: {label}"
 
     def _clip_bounds(self, ts, pad=None):
-        pad = self.idx["meta"]["sample_sec"] if pad is None else pad
+        pad = self.idx["meta"]["frame_interval_sec"] if pad is None else pad
         dur = self.idx["meta"]["duration"]
         return max(0.0, ts - pad), min(dur, ts + pad)
 
@@ -458,7 +427,7 @@ class VisionGuardPipeline:
             hits[i]["det_boxes"] = self._refresh_det_boxes_for_hit(hits[i], query)
             if hits[i].get("matched_detections"):
                 labels = sorted({x["name"] for x in hits[i]["matched_detections"]})
-                hits[i]["summary"] = f"detector-matched sampled frame at {best_ts:.2f}s | detected: {', '.join(labels)}"
+            hits[i]["summary"] = f"detector-matched indexed frame at {best_ts:.2f}s | detected: {', '.join(labels)}"
         return hits
 
     def _mark_unverified(self, rows, mode=None):
@@ -613,7 +582,7 @@ class VisionGuardPipeline:
         for chunk in clusters:
             peak = max(chunk, key=lambda x: x["score"])
             objs = sorted({obj for row in chunk for obj in row["objects"]})
-            start, end = self._clip_bounds(peak["ts"], pad=max(gap_sec, self.idx["meta"]["sample_sec"]))
+            start, end = self._clip_bounds(peak["ts"], pad=max(gap_sec, self.idx["meta"]["frame_interval_sec"]))
             out.append({
                 "query": peak["query"],
                 "score": max(x["score"] for x in chunk),
@@ -707,13 +676,11 @@ class VisionGuardPipeline:
         for hit in hits:
             appear = ", ".join(hit.get("appearances", []))
             suffix = f" | appearance: {appear}" if appear else ""
-            hit["summary"] = f"object-matched sampled frame at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects'])}{suffix}"
+            hit["summary"] = f"object-matched indexed frame at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects'])}{suffix}"
             hit["low_confidence"] = True
         return hits
 
-    def index_video_iter(self, video, sample_sec=None, win_sec=None):
-        if sample_sec is None:
-            sample_sec = self.settings.sample_sec
+    def index_video_iter(self, video, win_sec=None):
         if win_sec is None:
             win_sec = self.settings.win_sec
         enable_crop_embeddings = self.settings.enable_crop_embeddings
@@ -725,7 +692,7 @@ class VisionGuardPipeline:
         fps = vr.fps or 25.0
         total = len(vr)
         dur = total / fps if fps else 0.0
-        step = max(1, int(round(sample_sec * fps)))
+        frame_interval_sec = 1.0 / fps
         frames = []
         pending = []
         # Align decode batch with embedding batch; keep a small floor for IO efficiency.
@@ -737,8 +704,7 @@ class VisionGuardPipeline:
         crop_meta_list = []
         self.crop_meta = []
         self.crop_idx = SegmentVectorIndex(bit_width=4)
-        prev_sig = None
-        last_keep_ts = None
+        previous_frame = None
         last_kept_objects = set()
         t0 = time.perf_counter()
         timings = {
@@ -750,12 +716,11 @@ class VisionGuardPipeline:
         }
         processed_samples = 0
         kept_frames = 0
-        skipped_static = 0
-        skipped_empty = 0
-        total_samples = max(1, len(sample_indices := list(range(0, total, step))))
+        skipped_duplicates = 0
+        total_frames = total
         logger.info(
-            "scan_start video=%s sample_sec=%s win_sec=%s step=%s device=%s yolo=%s image_batch=%s crop_embeddings=%s",
-            os.path.basename(video), sample_sec, win_sec, step, self.enc.dev,
+            "scan_start video=%s frames=%s fps=%s deduplication=exact_consecutive_pixels win_sec=%s device=%s yolo=%s image_batch=%s crop_embeddings=%s",
+            os.path.basename(video), total, fps, win_sec, self.enc.dev,
             self.trk.model_name, self.enc.image_batch_size, enable_crop_embeddings,
         )
 
@@ -837,32 +802,28 @@ class VisionGuardPipeline:
 
             pending = []
 
-        for offset in range(0, len(sample_indices), batch_size):
+        for offset in range(0, total, batch_size):
             read_filter_started = time.perf_counter()
-            chunk = sample_indices[offset: offset + batch_size]
+            chunk = list(range(offset, min(total, offset + batch_size)))
             batch_frames = vr.get_batch(chunk)
-            valid = [(i, frame) for i, frame in zip(chunk, batch_frames) if frame is not None]
+            if len(batch_frames) != len(chunk) or any(frame is None for frame in batch_frames):
+                raise RuntimeError(f"Decoder did not return every requested frame in range {chunk[0]}-{chunk[-1]}.")
+            valid = list(zip(chunk, batch_frames))
             processed_before_batch = processed_samples
             processed_samples += len(chunk)
-            if not valid:
-                timings["frame_read_filter"] += time.perf_counter() - read_filter_started
-                continue
-            interesting = []
+            retained = []
             for i, frame in valid:
                 ts = vr.ts_for(i)
-                keep, sig, motion_score, keep_reason = self._is_interesting_frame(frame, prev_sig, ts, last_keep_ts)
-                prev_sig = sig
-                if keep:
-                    interesting.append((i, frame, ts, motion_score, keep_reason))
-                else:
-                    skipped_static += 1
+                if is_exact_duplicate(previous_frame, frame):
+                    skipped_duplicates += 1
+                    continue
+                retained.append((i, frame, ts))
+                previous_frame = frame.copy()
             timings["frame_read_filter"] += time.perf_counter() - read_filter_started
-            if not interesting:
+            if not retained:
                 continue
             # Sequential tracking preserves BoT-SORT state across frames.
-            for (i, frame, ts, motion_score, keep_reason) in interesting:
-                if frame is None:
-                    continue
+            for (i, frame, ts) in retained:
                 detection_started = time.perf_counter()
                 tracked_dets = self.trk.track_frame(frame, frame_idx=i, ts=ts, cls=None)
                 # Honour YOLO_CONF for stored evidence. A fixed override here
@@ -871,9 +832,6 @@ class VisionGuardPipeline:
                 detections = self._merge_detections_with_tracks(raw_dets, tracked_dets)
                 track_ids = [det["id"] for det in tracked_dets if "id" in det]
                 timings["detection_tracking"] += time.perf_counter() - detection_started
-                if self._is_non_content_frame(frame, detections):
-                    skipped_empty += 1
-                    continue
                 objs = {}
                 det_rows = []
                 for det in detections:
@@ -898,10 +856,8 @@ class VisionGuardPipeline:
                     "tracks": sorted(set(int(x) for x in track_ids)),
                     "appearances": self._appearance_tags(frame, det_rows),
                     "detections": det_rows,
-                    "motion_score": round(float(motion_score), 5),
-                    "keep_reason": keep_reason,
+                    "deduplication": "unique",
                     "object_delta": len(set(objs.keys()) ^ last_kept_objects),
-                    "still_objects": int(sum(objs.values()) if motion_score < 0.02 else 0),
                 }
                 frame_path = os.path.join(self.run_dir, "frames", f"f_{i:06d}.jpg")
                 write_future = self.pool.submit(cv2.imwrite, frame_path, frame)
@@ -915,16 +871,15 @@ class VisionGuardPipeline:
                 })
                 kept_frames += 1
                 last_kept_objects = set(objs.keys())
-                last_keep_ts = ts
                 current_processed = processed_before_batch + chunk.index(i) + 1
                 elapsed = max(1e-6, time.perf_counter() - t0)
                 sample_rate = current_processed / elapsed
-                remain = max(0, total_samples - current_processed)
+                remain = max(0, total_frames - current_processed)
                 eta = remain / sample_rate if sample_rate > 0 else 0.0
-                pct = min(100.0, 100.0 * current_processed / total_samples)
+                pct = min(100.0, 100.0 * current_processed / total_frames)
                 status = (
                     f"scanning {ts:.1f}s / {dur:.1f}s | {pct:.0f}% | eta {eta:.1f}s | "
-                    f"kept {kept_frames} | det {timings['detection_tracking']:.0f}s | "
+                    f"indexed {kept_frames} | exact duplicates {skipped_duplicates} | det {timings['detection_tracking']:.0f}s | "
                     f"emb {timings['frame_embeddings']:.0f}s"
                 )
                 if not write_future.result():
@@ -936,15 +891,14 @@ class VisionGuardPipeline:
                     "frame_number": int(i),
                     "timestamp_ms": int(i * 1000.0 / fps),
                     "processed_samples": int(current_processed),
-                    "total_samples": int(total_samples),
+                    "total_samples": int(total_frames),
                     "kept_frames": int(kept_frames),
                     "detections": int(len(det_rows)),
                     "frame_path": frame_path,
                     "objects": sorted(meta["objects"].keys()),
                     "tracks": meta["tracks"],
                     "detection_rows": det_rows,
-                    "motion_score": meta["motion_score"],
-                    "selection_reason": meta["keep_reason"],
+                    "selection_reason": "unique",
                 }
                 if len(pending) >= self.enc.image_batch_size:
                     flush_pending()
@@ -952,14 +906,13 @@ class VisionGuardPipeline:
         # Compute track statistics from accumulated tracking data
         track_stats = self.trk.compute_track_stats(fps=fps)
         self.track_stats = track_stats
-        block = max(1, int(round(win_sec / sample_sec)))
+        block = max(1, int(round(win_sec / frame_interval_sec)))
         segs = []
         seg_vec_chunks = []
         seg_id_chunks = []
         seg_chunk_vecs = []
         seg_chunk_ids = []
-        for j, item in enumerate(frames):
-            lo = (j // block) * block
+        for lo in range(0, len(frames), block):
             hi = min(len(frames), lo + block)
             chunk = frames[lo:hi]
             emb = np.mean([np.asarray(x["emb"], dtype=np.float32).reshape(-1) for x in chunk], axis=0).astype(np.float32)
@@ -967,33 +920,22 @@ class VisionGuardPipeline:
             emb = emb.astype(np.float32)
             objs = {}
             tids = set()
-            motion_scores = []
-            still_objects = 0
-            forced_keeps = 0
             object_delta = 0
             for x in chunk:
                 tids |= set(x["meta"]["tracks"])
                 for k, v in x["meta"]["objects"].items():
                     objs[k] = max(objs.get(k, 0), v)
-                motion_scores.append(float(x["meta"].get("motion_score", 0.0)))
-                still_objects += int(x["meta"].get("still_objects", 0))
                 object_delta += int(x["meta"].get("object_delta", 0))
-                if x["meta"].get("keep_reason") == "forced_gap":
-                    forced_keeps += 1
             segs.append({
                 "seg_id": np.uint64(len(segs)),
                 "start": chunk[0]["ts"],
                 "end": chunk[-1]["ts"],
-                "mid": item["ts"],
+                "mid": chunk[len(chunk) // 2]["ts"],
                 "emb": emb,
-                "frame_path": item["frame_path"],
+                "frame_path": chunk[len(chunk) // 2]["frame_path"],
                 "objects": sorted(objs.keys()),
                 "tracks": sorted(tids),
                 "temporal_stats": {
-                    "avg_motion": round(float(np.mean(motion_scores)) if motion_scores else 0.0, 5),
-                    "max_motion": round(float(np.max(motion_scores)) if motion_scores else 0.0, 5),
-                    "still_object_frames": still_objects,
-                    "forced_keep_frames": forced_keeps,
                     "object_delta_sum": object_delta,
                 },
                 "tags": [],
@@ -1008,13 +950,12 @@ class VisionGuardPipeline:
             "fps": fps,
             "frames": total,
             "duration": dur,
-            "sample_sec": sample_sec,
+            "frame_interval_sec": frame_interval_sec,
             "win_sec": win_sec,
             "segments": len(segs),
-            "sampled_frames": total_samples,
+            "decoded_frames": total_frames,
             "kept_frames": kept_frames,
-            "skipped_static_frames": skipped_static,
-            "skipped_empty_frames": skipped_empty,
+            "skipped_exact_duplicate_frames": skipped_duplicates,
             "enable_crop_embeddings": enable_crop_embeddings,
             "device": self.enc.dev,
             "embedding_mode": self.enc.mode(),
@@ -1036,9 +977,7 @@ class VisionGuardPipeline:
                     "appearances": x["meta"]["appearances"],
                     "tracks": x["meta"]["tracks"],
                     "detections": x["meta"]["detections"],
-                    "motion_score": x["meta"].get("motion_score", 0.0),
-                    "keep_reason": x["meta"].get("keep_reason", ""),
-                    "still_objects": x["meta"].get("still_objects", 0),
+                    "deduplication": x["meta"].get("deduplication", ""),
                     "object_delta": x["meta"].get("object_delta", 0),
                 }
                 for x in frames
@@ -1060,7 +999,7 @@ class VisionGuardPipeline:
         index_started = time.perf_counter()
         self.frame_idx.build_merged(frame_chunks, path=os.path.join(self.run_dir, "reports", "frame_index.tvim"))
         self.search_idx.build_merged(seg_chunks, path=os.path.join(self.run_dir, "reports", "segment_index.tvim"))
-        # Build crop embedding index (optional, graceful degradation)
+        # Build the crop embedding index only when explicitly enabled.
         if crop_vec_chunks:
             crop_chunks = list(zip(crop_vec_chunks, crop_id_chunks))
             self.crop_idx.build_merged(crop_chunks, path=os.path.join(self.run_dir, "reports", "crop_index.tvim"))
@@ -1085,9 +1024,7 @@ class VisionGuardPipeline:
                         "tracks": x["tracks"],
                         "appearances": x["appearances"],
                         "detections": x["detections"],
-                        "motion_score": x.get("motion_score", 0.0),
-                        "keep_reason": x.get("keep_reason", ""),
-                        "still_objects": x.get("still_objects", 0),
+                        "deduplication": x.get("deduplication", ""),
                         "object_delta": x.get("object_delta", 0),
                     }
                     for x in self.idx["frames"]
@@ -1115,9 +1052,9 @@ class VisionGuardPipeline:
         self.idx["meta"]["scan_timings"] = {k: round(v, 3) for k, v in timings.items()}
         logger.info(
             "scan_complete detection_s=%.1f frame_embedding_s=%.1f crop_embedding_s=%.1f "
-            "frame_read_filter_s=%.1f kept=%s static_skip=%s empty_skip=%s index_s=%.1f total_s=%.1f",
+            "frame_read_filter_s=%.1f indexed=%s exact_duplicate_skip=%s index_s=%.1f total_s=%.1f",
             timings["detection_tracking"], timings["frame_embeddings"], timings["crop_embeddings"],
-            timings["frame_read_filter"], kept_frames, skipped_static, skipped_empty,
+            timings["frame_read_filter"], kept_frames, skipped_duplicates,
             timings["index_building"], total_elapsed,
         )
         yield {
@@ -1568,7 +1505,7 @@ class VisionGuardPipeline:
             })
         ranked_rows = sorted(rows, key=lambda x: x["score"], reverse=True)
         rows = [x for x in ranked_rows if x["score"] >= 0.14]
-        out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
+        out = self._cluster_frame_hits(rows, top_k=top_k, gap_sec=max(self.idx["meta"]["frame_interval_sec"] * 1.25, 1.0))
         if out:
             out = self._apply_reselection(out, q, qv, top_n=min(4, len(out)))
             verify_n = min(8, len(out)) if not qobjs else min(4, len(out))
@@ -1578,7 +1515,7 @@ class VisionGuardPipeline:
             obj_hits = self._apply_reselection(obj_hits, q, qv, top_n=min(4, len(obj_hits)))
             return q, qv, qobjs, obj_hits, min(4, len(obj_hits))
         if ranked_rows and not self._is_strict_object_query(q):
-            weak = self._cluster_frame_hits(ranked_rows[: max(top_k * 3, 8)], top_k=top_k, gap_sec=max(self.idx["meta"]["sample_sec"] * 1.25, 1.0))
+            weak = self._cluster_frame_hits(ranked_rows[: max(top_k * 3, 8)], top_k=top_k, gap_sec=max(self.idx["meta"]["frame_interval_sec"] * 1.25, 1.0))
             for hit in weak:
                 hit["summary"] = f"low-confidence visual match at {hit['peak_ts']:.2f}s | detected: {', '.join(hit['objects']) if hit['objects'] else 'no tracked objects'}"
                 hit["low_confidence"] = True

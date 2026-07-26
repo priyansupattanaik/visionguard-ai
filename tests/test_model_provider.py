@@ -25,9 +25,9 @@ class FakeResponse:
         self.stream.close()
 
 
-def test_provider_selection_defaults_to_llama_cpp(monkeypatch):
+def test_provider_selection_defaults_to_local_no_provider(monkeypatch):
     monkeypatch.delenv("MODEL_PROVIDER", raising=False)
-    assert create_model_provider().provider_name == "llama_cpp"
+    assert isinstance(create_model_provider(), NoneModelProvider)
 
 
 def test_provider_selection_supports_none(monkeypatch):

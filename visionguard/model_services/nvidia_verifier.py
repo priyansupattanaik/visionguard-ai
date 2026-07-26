@@ -15,7 +15,7 @@ from visionguard.model_services.model_provider import OpenAICompatibleProvider
 
 class NvidiaFrameVerifier:
     def __init__(self, model=None, timeout=None):
-        self.selected_provider = os.getenv("MODEL_PROVIDER", "llama_cpp").strip().casefold()
+        self.selected_provider = os.getenv("MODEL_PROVIDER", "none").strip().casefold()
         if self.selected_provider == "llama_cpp":
             self.base_url = os.getenv("LLAMA_CPP_VISION_URL", "http://127.0.0.1:8081").strip().rstrip("/")
             self.endpoint = f"{self.base_url}/v1" if self.base_url and not self.base_url.endswith("/v1") else self.base_url

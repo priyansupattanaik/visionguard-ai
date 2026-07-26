@@ -2,7 +2,7 @@
 
 ## Current state
 
-VisionGuard is a local-first, evidence-grounded video retrieval system. The operational path is upload, explicit index, decode/sample, deduplicate, detection/tracking, metadata and embedding construction, segment indexing, query planning, retrieval, optional verification, and timestamped export. The web application does not begin indexing during upload.
+VisionGuard is a local-first, evidence-grounded video retrieval system. The operational path is upload, explicit index, decode every frame, exact consecutive deduplication, detection/tracking, metadata and embedding construction, segment indexing, query planning, retrieval, optional verification, and timestamped export. The web application does not begin indexing during upload.
 
 ## Refactor applied
 

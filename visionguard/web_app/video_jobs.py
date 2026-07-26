@@ -186,8 +186,8 @@ def materialize_frames(video_id: str, pipeline) -> list[dict]:
             "objects": list(row.get("objects", [])),
             "tracks": list(row.get("tracks", [])),
             "detections": detections,
-            "motion_score": float(row.get("motion_score", 0.0)),
-            "selection_reason": row.get("keep_reason", ""),
+            "deduplication": row.get("deduplication", ""),
+            "selection_reason": row.get("deduplication", ""),
             "_image_path": str(image_path),
         })
     return frames
@@ -218,7 +218,7 @@ def frame_from_progress_event(video_id: str, event: dict) -> dict | None:
         "objects": list(event.get("objects", [])),
         "tracks": list(event.get("tracks", [])),
         "detections": detections,
-        "motion_score": float(event.get("motion_score", 0.0)),
+        "deduplication": event.get("selection_reason", ""),
         "selection_reason": event.get("selection_reason", ""),
         "_image_path": str(image_path),
     }
