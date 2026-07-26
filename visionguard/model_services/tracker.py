@@ -67,6 +67,12 @@ class ObjectTracker:
         return {"quantize": "fp16"} if self.use_half else {}
 
     def track(self, frame, cls=None):
+        """Run one detector-plus-tracker inference and retain every detection.
+
+        Ultralytics returns detection boxes even when BoT-SORT has not assigned
+        an ID yet. Keeping those boxes avoids a second `predict()` call while
+        preserving the detector's complete evidence set.
+        """
         self.load()
         res = self.m.track(
             frame,
@@ -80,20 +86,22 @@ class ObjectTracker:
         )
         out = []
         for r in res:
-            if r.boxes is None or r.boxes.id is None:
+            if r.boxes is None:
                 continue
-            ids = r.boxes.id.int().cpu().tolist()
             boxes = r.boxes.xyxy.cpu().tolist()
             confs = r.boxes.conf.cpu().tolist()
             clss = r.boxes.cls.int().cpu().tolist()
+            ids = r.boxes.id.int().cpu().tolist() if r.boxes.id is not None else [None] * len(boxes)
             for tid, box, cf, ci in zip(ids, boxes, confs, clss):
-                out.append({
-                    "id": int(tid),
+                row = {
                     "box": [round(x, 2) for x in box],
                     "conf": round(float(cf), 4),
                     "cls": int(ci),
                     "name": self.m.names.get(int(ci), str(ci)),
-                })
+                }
+                if tid is not None:
+                    row["id"] = int(tid)
+                out.append(row)
         return out
 
     def detect(self, frame, cls=None, conf=None):
@@ -154,11 +162,13 @@ class ObjectTracker:
     def track_frame(self, frame, frame_idx, ts, cls=None):
         """Track a single frame, recording history for later stats computation.
 
-        Returns list of detections with track IDs for this frame.
+        Returns every detector observation, adding a track ID when available.
         """
         dets = self.track(frame, cls=cls)
         for det in dets:
-            tid = det["id"]
+            tid = det.get("id")
+            if tid is None:
+                continue
             self._track_history[tid].append({
                 "frame_idx": frame_idx,
                 "ts": ts,

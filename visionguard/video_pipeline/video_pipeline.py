@@ -260,31 +260,6 @@ class VisionGuardPipeline:
             })
         return out
 
-    def _merge_detections_with_tracks(self, detections, tracked):
-        """Keep every detector result and attach a track ID when boxes agree."""
-        merged = []
-        used_tracks = set()
-        min_iou = self.settings.track_detection_iou
-        for detection in detections or []:
-            row = dict(detection)
-            best_index = None
-            best_iou = 0.0
-            for index, track in enumerate(tracked or []):
-                if index in used_tracks or int(track.get("cls", -1)) != int(row.get("cls", -2)):
-                    continue
-                overlap = self._iou(row["box"], track["box"])
-                if overlap > best_iou:
-                    best_iou = overlap
-                    best_index = index
-            if best_index is not None and best_iou >= min_iou:
-                row["track_id"] = int(tracked[best_index]["id"])
-                used_tracks.add(best_index)
-            merged.append(row)
-        for index, track in enumerate(tracked or []):
-            if index not in used_tracks:
-                merged.append(dict(track))
-        return merged
-
     def _refine_detector_hits(self, q, top_k):
         """Aggregate calibrated detector evidence into temporal segments.
 
@@ -825,12 +800,8 @@ class VisionGuardPipeline:
             # Sequential tracking preserves BoT-SORT state across frames.
             for (i, frame, ts) in retained:
                 detection_started = time.perf_counter()
-                tracked_dets = self.trk.track_frame(frame, frame_idx=i, ts=ts, cls=None)
-                # Honour YOLO_CONF for stored evidence. A fixed override here
-                # made the deployed sensitivity setting ineffective.
-                raw_dets = self.trk.detect(frame, cls=None)
-                detections = self._merge_detections_with_tracks(raw_dets, tracked_dets)
-                track_ids = [det["id"] for det in tracked_dets if "id" in det]
+                detections = self.trk.track_frame(frame, frame_idx=i, ts=ts, cls=None)
+                track_ids = [det["id"] for det in detections if "id" in det]
                 timings["detection_tracking"] += time.perf_counter() - detection_started
                 objs = {}
                 det_rows = []
@@ -882,8 +853,6 @@ class VisionGuardPipeline:
                     f"indexed {kept_frames} | exact duplicates {skipped_duplicates} | det {timings['detection_tracking']:.0f}s | "
                     f"emb {timings['frame_embeddings']:.0f}s"
                 )
-                if not write_future.result():
-                    raise RuntimeError(f"Failed to write evidence frame {frame_path}.")
                 yield {
                     "kind": "preview",
                     "image": self._preview(frame, det_rows, ts),

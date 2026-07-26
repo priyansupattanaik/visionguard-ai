@@ -108,20 +108,6 @@ def test_open_query_uses_bounded_visual_verification_when_configured(tmp_path, m
     assert candidates[0]["retrieval_mode"] == "exhaustive_visual_verification"
 
 
-def test_detector_tracker_merge_preserves_untracked_runtime_classes(tmp_path):
-    pipe = VisionGuardPipeline(out_dir=str(tmp_path / "output"))
-    detections = [
-        {"box": [0, 0, 20, 20], "conf": 0.9, "cls": 1, "name": "moving class"},
-        {"box": [30, 30, 40, 40], "conf": 0.8, "cls": 2, "name": "static class"},
-    ]
-    tracks = [{"id": 7, "box": [0, 0, 20, 20], "conf": 0.88, "cls": 1, "name": "moving class"}]
-
-    merged = pipe._merge_detections_with_tracks(detections, tracks)
-
-    assert {row["name"] for row in merged} == {"moving class", "static class"}
-    assert next(row for row in merged if row["name"] == "moving class")["track_id"] == 7
-
-
 def test_detector_retrieval_returns_a_calibrated_evidence_segment(tmp_path, monkeypatch):
     monkeypatch.setenv("MIN_EVIDENCE_CONFIDENCE", "0.25")
     pipe = VisionGuardPipeline(out_dir=str(tmp_path / "output"))
