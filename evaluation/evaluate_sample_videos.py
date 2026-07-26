@@ -55,13 +55,20 @@ def inspect_video(path: Path, detector: ObjectTracker, sample_seconds: float) ->
     }
 
 
-def labelled_accuracy(report: list[dict], labels: dict) -> dict | None:
-    expected = labels.get("expected_objects_by_video", {})
-    if not expected:
+def labelled_presence_metrics(report: list[dict], labels: dict) -> dict | None:
+    videos = labels.get("videos", {})
+    reviewed = {
+        name: row for name, row in videos.items()
+        if isinstance(row, dict) and row.get("review_status") == "reviewed"
+    }
+    if not reviewed:
         return None
     true_positive = false_positive = false_negative = 0
     for row in report:
-        truth = set(expected.get(row["file"], []))
+        label = reviewed.get(row["file"])
+        if label is None:
+            continue
+        truth = set(label.get("present_objects", []))
         predicted = set(row["detections_by_class"])
         true_positive += len(truth & predicted)
         false_positive += len(predicted - truth)
@@ -69,14 +76,19 @@ def labelled_accuracy(report: list[dict], labels: dict) -> dict | None:
     precision = true_positive / (true_positive + false_positive) if true_positive + false_positive else 0
     recall = true_positive / (true_positive + false_negative) if true_positive + false_negative else 0
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0
-    return {"precision": round(precision, 4), "recall": round(recall, 4), "f1": round(f1, 4)}
+    return {
+        "scope": "reviewed video-level object presence only",
+        "precision": round(precision, 4),
+        "recall": round(recall, 4),
+        "f1": round(f1, 4),
+    }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--sample-seconds", type=float, default=2.0)
     parser.add_argument("--labels", type=Path, default=ROOT / "evaluation" / "ground_truth.json")
-    parser.add_argument("--output", type=Path, default=ROOT / "evaluation" / "latest_asset_report.json")
+    parser.add_argument("--output", type=Path, default=ROOT / "output" / "evaluation" / "latest_asset_report.json")
     args = parser.parse_args()
     if args.sample_seconds <= 0:
         raise SystemExit("--sample-seconds must be positive")
@@ -88,9 +100,10 @@ def main() -> None:
     result = {
         "sample_interval_seconds": args.sample_seconds,
         "videos": rows,
-        "accuracy": labelled_accuracy(rows, labels),
-        "accuracy_note": "Accuracy requires human ground-truth labels; detector confidence is not accuracy.",
+        "presence_metrics": labelled_presence_metrics(rows, labels),
+        "metrics_note": "Metrics include only human-reviewed labels. Detector confidence is not accuracy.",
     }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
     print(json.dumps(result, indent=2))
 

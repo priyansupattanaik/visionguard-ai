@@ -8,7 +8,8 @@ Run `.\.venv\Scripts\python.exe run.py`. The same Flask application serves the b
 | GET | `/api/assets` | Bundled sample videos |
 | GET | `/api/assets/<name>` | Stream a bundled sample video |
 | GET | `/api/model/health` | Selected provider plus text, vision, NVIDIA, and Groq capability state |
-| POST | `/api/videos/upload` | Store and validate an MP4, create `video_id` and `job_id`, and start processing |
+| POST | `/api/videos/upload` | Store and validate an MP4, then create an uploaded `video_id` and `job_id` |
+| POST | `/api/videos/<video_id>/index` | Start the explicit decode-to-index job for an uploaded video |
 | GET | `/api/videos/<video_id>` | Real video metadata, logical chunks, and processing summary |
 | GET | `/api/videos/<video_id>/content` | Stream the immutable stored upload |
 | GET | `/api/videos/<video_id>/status` | Truthful job and stage states |

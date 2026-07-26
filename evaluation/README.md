@@ -1,7 +1,7 @@
-# Sample-video evaluation
+# Evaluation
 
-Run `python evaluation/evaluate_sample_videos.py` from the project root. The report verifies video readability and measures detector coverage, confidence, object-class counts, and processing time. It does not call confidence "accuracy."
+Evaluation is review-gated. `ground_truth.json` intentionally contains no labels until a human reviewer adds them; an empty schema is more truthful than fabricated accuracy.
 
-To calculate precision, recall, and F1, add human-reviewed object labels to `ground_truth.json`. Presence labels measure whether each class appears anywhere in a video; frame-level and event-level accuracy require correspondingly detailed annotations and are not inferred by the simple evaluator.
+Each reviewed video entry must use `review_status: "reviewed"`, `present_objects`, timestamped `segments`, and query cases with accepted timestamp windows. The evaluator reports video-level presence precision, recall, and F1 only for reviewed entries. Temporal IoU, retrieval recall@K, verification precision, and abstention quality require the corresponding query/segment annotations and must be reported separately.
 
-Run `python evaluation/verify_e2e_workflow.py` for a real local multipart upload, metadata, stages, frames, image routes, timestamp mapping, matching query, and insufficient-evidence regression. Run `python evaluation/verify_browser_workflow.py` to drive the same workflow in installed Microsoft Edge and validate result seeking, console/network errors, and mobile overflow.
+Run `python evaluation/evaluate_sample_videos.py` for readability, coverage, confidence distributions, and reviewed presence metrics. Its output is generated under `output/evaluation/`, never committed. Run `python evaluation/verify_e2e_workflow.py` for the local multipart upload-to-query contract. The browser workflow additionally requires its documented optional dependency.

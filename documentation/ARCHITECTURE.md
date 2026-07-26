@@ -1,23 +1,30 @@
 # Architecture
 
-VisionGuard has one operational application and one indexing path. The Flask server accepts a bundled or local video, the pipeline samples frames, YOLO detects and tracks runtime classes, and the encoder stores visual or metadata vectors with timestamps and detection details. Search plans are built from the user query plus the active detector's labels; there is no application object whitelist.
+VisionGuard has one operational application and one evidence path. Upload registers an immutable video and its decoder metadata. A separate index action samples and deduplicates frames, detects and tracks runtime classes, groups calibrated evidence into temporal segments, and stores vectors plus source metadata. Search plans use active detector labels and a small documented alias layer; aliases only resolve classes the active detector actually supports.
+
+The code follows four local boundaries: `web_app` owns HTTP/job state, `video_pipeline` owns decode/index/query orchestration, `model_services` owns model adapters, and `search` owns deterministic language routing. `runtime/settings.py` validates pipeline configuration once per pipeline instance. `video_pipeline/detector_evidence.py` owns detector-observation calibration and temporal grouping; it does not load models or write files.
 
 ```mermaid
 flowchart LR
   V[Video] --> S[Sample frames]
   S --> D[Detect and track]
   D --> M[Frame metadata]
+  M --> G[Calibrated evidence segments]
   S --> E[Visual embeddings when available]
   M --> F[Metadata embeddings fallback]
   E --> I[Vector index]
   F --> I
-  Q[User query] --> P[Detector-aware query planner]
-  P --> R[Metadata, vector, or bounded visual retrieval]
+  Q[User query] --> P[Intent and alias routing]
+  P --> R[Segment, vector, or bounded visual retrieval]
   I --> R
-  R --> O[Timestamped evidence]
+  G --> R
+  R --> V[Optional visual verification]
+  V --> O[Timestamped evidence or abstention]
 ```
 
-The preferred retrieval path uses SigLIP embeddings. When that model is unavailable, the fallback index is still meaningful: it encodes detected classes, colors, appearances, and motion rather than zero vectors. Exact detector-label queries remain local. Open descriptions can use bounded NVIDIA frame verification when configured; otherwise the response reports that the capability is unavailable instead of inventing a match.
+Each result must retain a source-frame path, peak timestamp, evidence interval, retrieval route, and verification state. Retrieval proposes candidates; optional visual verification changes their state but never fabricates source evidence.
+
+The preferred semantic path uses locally cached SigLIP embeddings. When that model is unavailable, the local index remains meaningful because it encodes detected classes, colors, appearances, and motion rather than zero vectors. Exact detector-label and documented-alias queries remain local. Open descriptions can use bounded visual verification only when explicitly configured; otherwise the response abstains rather than inventing a match.
 
 Text reasoning is selected through `MODEL_PROVIDER` and supports `llama_cpp`, `nvidia`, `groq`, and `none`. llama.cpp is the local-first default. Provider health and query-intent normalization are isolated from ingestion, so an unavailable text or vision endpoint cannot prevent video storage, metadata probing, frame extraction, detection, or deterministic timestamps. Open visual claims still require semantic or vision evidence; a text model alone cannot promote an unsupported event to a result.
 

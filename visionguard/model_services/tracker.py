@@ -1,11 +1,13 @@
 import os
-import shutil
 from collections import defaultdict
 
 import torch
 from visionguard.runtime.cache import resolve_device
 
-os.environ.setdefault("YOLO_CONFIG_DIR", os.path.join(os.getcwd(), ".yolo"))
+os.environ.setdefault(
+    "YOLO_CONFIG_DIR",
+    os.path.join(os.getcwd(), ".cache", "visionguard", "ultralytics"),
+)
 os.makedirs(os.environ["YOLO_CONFIG_DIR"], exist_ok=True)
 
 from ultralytics import YOLO
@@ -28,22 +30,23 @@ class ObjectTracker:
 
     def _cached_model_path(self):
         if os.path.dirname(self.model_name):
-            return self.model_name
+            if os.path.isfile(self.model_name):
+                return self.model_name
+            raise FileNotFoundError(f"Configured YOLO model was not found: {self.model_name}")
         base = os.getenv("VISION_GUARD_MODEL_DIR", ".models")
-        os.makedirs(base, exist_ok=True)
         cached = os.path.join(base, self.model_name)
-        return cached if os.path.exists(cached) else self.model_name
+        if os.path.isfile(cached):
+            return cached
+        raise FileNotFoundError(
+            f"YOLO model '{self.model_name}' is missing from '{base}'. "
+            "Run scripts/bootstrap_models.py before indexing a video."
+        )
 
     def load(self):
         if self.m is not None:
             return
         model_path = self._cached_model_path()
         self.m = YOLO(model_path)
-        if model_path == self.model_name and os.path.exists(self.model_name):
-            cached = os.path.join(os.getenv("VISION_GUARD_MODEL_DIR", ".models"), self.model_name)
-            os.makedirs(os.path.dirname(cached), exist_ok=True)
-            if not os.path.exists(cached):
-                shutil.copy2(self.model_name, cached)
         self.m.to(self.dev)
 
     def class_ids(self, names):

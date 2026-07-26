@@ -5,12 +5,14 @@ import os
 from pathlib import Path
 
 from visionguard.runtime.env import load_project_env
+from visionguard.runtime.logging import configure_logging
 
 ROOT = Path(__file__).resolve().parent
 load_project_env(ROOT)
 
 
 def main() -> None:
+    configure_logging()
     from visionguard.web_app.server import app
 
     host = os.getenv("VISION_GUARD_HOST", "127.0.0.1")

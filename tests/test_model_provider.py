@@ -11,6 +11,7 @@ from visionguard.model_services.model_provider import (
     OpenAICompatibleProvider,
     create_model_provider,
 )
+from visionguard.model_services.nvidia_verifier import NvidiaFrameVerifier
 
 
 class FakeResponse:
@@ -97,3 +98,13 @@ def test_missing_nvidia_key_is_irrelevant_in_llama_mode(monkeypatch):
 
     assert provider.provider_name == "llama_cpp"
     assert provider.configured is True
+
+
+def test_nvidia_verifier_warms_when_first_used(monkeypatch):
+    monkeypatch.setenv("MODEL_PROVIDER", "nvidia")
+    monkeypatch.setenv("NVIDIA_API_KEY", "configured-in-test-only")
+    verifier = NvidiaFrameVerifier()
+
+    assert verifier.backend == "unconfigured"
+    assert verifier.is_ready() is True
+    assert verifier.verification_mode() == "nvidia_api"

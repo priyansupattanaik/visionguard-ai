@@ -78,6 +78,11 @@ class NvidiaFrameVerifier:
         return self.available_mode if self._ready else f"{self.available_mode}_unavailable"
 
     def is_ready(self):
+        # Query handling can run before the asynchronous application warm-up has
+        # completed. Initialise on first use so configured NVIDIA verification
+        # is not incorrectly reported as unavailable in that window.
+        if self.backend == "unconfigured":
+            self.warmup()
         return bool(self._ready) and self._last_error is None
 
     def _threshold(self, query):

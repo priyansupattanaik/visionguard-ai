@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import re
 import shutil
 import time
@@ -10,6 +11,7 @@ import cv2
 import numpy as np
 
 from visionguard.runtime.cache import setup_cache
+from visionguard.runtime.settings import PipelineSettings
 from visionguard.model_services.clip_generator import ClipGenerator
 from visionguard.model_services.nvidia_verifier import NvidiaFrameVerifier
 from visionguard.model_services.model_provider import (
@@ -22,10 +24,12 @@ from visionguard.model_services.segmenter import GroundedSegmenter
 from visionguard.model_services.tracker import ObjectTracker
 from visionguard.video_pipeline.vector_index import SegmentVectorIndex, _as_2d_float32
 from visionguard.video_pipeline.video_reader import DecordVideoReader
+from visionguard.video_pipeline.detector_evidence import DetectorEvidenceRetriever
 from visionguard.model_services.vlm import SearchEncoder
 from visionguard.search import DeterministicQueryPlanner
 
 setup_cache()
+logger = logging.getLogger(__name__)
 
 
 def _stack_embeddings(vectors):
@@ -35,7 +39,8 @@ def _stack_embeddings(vectors):
 
 class VisionGuardPipeline:
     def __init__(self, out_dir="output", yolo="yolo11m.pt", clip_model="google/siglip2-so400m-patch14-384", verifier_model=None, sam="facebook/sam2.1-hiera-small"):
-        self.out_dir = os.getenv("VISION_GUARD_OUT_DIR") or out_dir
+        self.settings = PipelineSettings.from_env(out_dir)
+        self.out_dir = self.settings.out_dir
         self.trk = ObjectTracker(model=os.getenv("YOLO_MODEL") or yolo)
         self.enc = SearchEncoder(model=os.getenv("CLIP_MODEL") or clip_model)
         self.query_planner = DeterministicQueryPlanner()
@@ -55,11 +60,11 @@ class VisionGuardPipeline:
         self.crop_meta = []
         self.track_stats = {}
         self.pool = ThreadPoolExecutor(max_workers=4)
-        self.verifier_ready_timeout = max(0.0, float(os.getenv("VERIFIER_READY_TIMEOUT", "30")))
-        self.verifier_poll_interval = max(0.05, float(os.getenv("VERIFIER_POLL_INTERVAL", "0.25")))
+        self.verifier_ready_timeout = self.settings.verifier_ready_timeout
+        self.verifier_poll_interval = self.settings.verifier_poll_interval
         self.raw_jobs = {}
         self.seg_jobs = {}
-        os.makedirs(out_dir, exist_ok=True)
+        os.makedirs(self.out_dir, exist_ok=True)
         self._warmup_failures = {}
         self.zero_query = None
         self.last_query_plan = None
@@ -290,7 +295,7 @@ class VisionGuardPipeline:
         """Keep every detector result and attach a track ID when boxes agree."""
         merged = []
         used_tracks = set()
-        min_iou = float(os.getenv("TRACK_DETECTION_IOU", "0.5"))
+        min_iou = self.settings.track_detection_iou
         for detection in detections or []:
             row = dict(detection)
             best_index = None
@@ -312,65 +317,24 @@ class VisionGuardPipeline:
         return merged
 
     def _refine_detector_hits(self, q, top_k):
+        """Aggregate calibrated detector evidence into temporal segments.
+
+        A high-confidence frame is evidence, not a complete event. Grouping
+        nearby matched frames gives retrieval a defensible start/end interval
+        while retaining the strongest source frame for inspection.
+        """
         class_ids, cls_to_name = self._query_detector_classes(q)
         if not class_ids:
             return []
         qobjs = set(self._q_objs(q))
         qcolors = set(self._query_colors(q))
-        rows = []
-        for row in self.idx.get("frames", []):
-            matched = self._matching_detections(row, qobjs, qcolors, cls_to_name)
-            if not matched:
-                continue
-            best_conf = max(float(x.get("conf", 0.0)) for x in matched)
-            if best_conf < 0.2:
-                continue
-            score = 0.44 + 0.32 * best_conf + 0.05 * max(0, len(matched) - 1)
-            rows.append({
-                "query": q,
-                "score": score,
-                "base_score": score,
-                "retrieval_mode": "detector",
-                "frame_id": row.get("frame_id"),
-                "ts": row["ts"],
-                "representative_frame_path": row["frame_path"],
-                "frame_path": row["frame_path"],
-                "objects": sorted({x["name"] for x in matched}),
-                "appearances": row.get("appearances", []),
-                "tracks": row["tracks"],
-                "matched_detections": matched,
-                "det_boxes": [x["box"] for x in matched],
-            })
-        rows = sorted(rows, key=lambda x: x["score"], reverse=True)
-        if not rows:
-            return []
-        hits = []
-        gap_sec = max(self.idx["meta"]["sample_sec"] * 1.25, 1.0)
-        for row in rows:
-            if len(hits) >= top_k:
-                break
-            if any(abs(row["ts"] - x["peak_ts"]) < gap_sec for x in hits):
-                continue
-            start, end = self._clip_bounds(row["ts"])
-            labels = sorted({x["name"] for x in row["matched_detections"]})
-            hits.append({
-                "query": q,
-                "score": row["score"],
-                "base_score": row["base_score"],
-                "retrieval_mode": "detector",
-                "cache_key": f"frame:{row.get('frame_id', row['ts'])}",
-                "start": start,
-                "end": end,
-                "peak_ts": row["ts"],
-                "frame_path": row["frame_path"],
-                "objects": labels,
-                "tracks": row["tracks"],
-                "appearances": row.get("appearances", []),
-                "matched_detections": row["matched_detections"],
-                "tags": [],
-                "summary": f"detector-matched sampled frame at {row['ts']:.2f}s | detected: {', '.join(labels)}",
-            })
-        return hits
+        retriever = DetectorEvidenceRetriever(
+            self._matching_detections,
+            self._clip_bounds,
+            self.settings.minimum_evidence_confidence,
+        )
+        return retriever.retrieve(self.idx, q, qobjs, qcolors, class_ids, cls_to_name, top_k)
+
 
     def _draw_boxes(self, src_path, boxes, out_name, label_text=None):
         if not src_path or not os.path.exists(src_path):
@@ -749,10 +713,10 @@ class VisionGuardPipeline:
 
     def index_video_iter(self, video, sample_sec=None, win_sec=None):
         if sample_sec is None:
-            sample_sec = float(os.getenv("SAMPLE_SEC", "1.5"))
+            sample_sec = self.settings.sample_sec
         if win_sec is None:
-            win_sec = float(os.getenv("WIN_SEC", "4.5"))
-        enable_crop_embeddings = os.getenv("ENABLE_CROP_EMBEDDINGS", "0").strip().lower() not in {"0", "false", "no", "off"}
+            win_sec = self.settings.win_sec
+        enable_crop_embeddings = self.settings.enable_crop_embeddings
         self._new_run(video)
         self.trk.reset()
         vr = DecordVideoReader(video)
@@ -789,11 +753,10 @@ class VisionGuardPipeline:
         skipped_static = 0
         skipped_empty = 0
         total_samples = max(1, len(sample_indices := list(range(0, total, step))))
-        print(
-            f"[Scan] start video={os.path.basename(video)} sample_sec={sample_sec} "
-            f"win_sec={win_sec} step={step} device={self.enc.dev} "
-            f"yolo={self.trk.model_name} image_batch={self.enc.image_batch_size} "
-            f"crop_embeddings={'on' if enable_crop_embeddings else 'off'}"
+        logger.info(
+            "scan_start video=%s sample_sec=%s win_sec=%s step=%s device=%s yolo=%s image_batch=%s crop_embeddings=%s",
+            os.path.basename(video), sample_sec, win_sec, step, self.enc.dev,
+            self.trk.model_name, self.enc.image_batch_size, enable_crop_embeddings,
         )
 
         def flush_pending():
@@ -1150,15 +1113,13 @@ class VisionGuardPipeline:
         total_elapsed = time.perf_counter() - t0
         timings["total"] = total_elapsed
         self.idx["meta"]["scan_timings"] = {k: round(v, 3) for k, v in timings.items()}
-        print(f"[Scan] Detection: {timings['detection_tracking']:.1f}s")
-        print(f"[Scan] Frame Embedding: {timings['frame_embeddings']:.1f}s")
-        if enable_crop_embeddings:
-            print(f"[Scan] Crop Embedding: {timings['crop_embeddings']:.1f}s")
-        else:
-            print("[Scan] Crop Embedding: skipped (ENABLE_CROP_EMBEDDINGS=0)")
-        print(f"[Scan] Frame read/filter: {timings['frame_read_filter']:.1f}s | kept={kept_frames} static_skip={skipped_static} empty_skip={skipped_empty}")
-        print(f"[Scan] Index building: {timings['index_building']:.1f}s")
-        print(f"[Scan] Total time: {total_elapsed:.1f}s")
+        logger.info(
+            "scan_complete detection_s=%.1f frame_embedding_s=%.1f crop_embedding_s=%.1f "
+            "frame_read_filter_s=%.1f kept=%s static_skip=%s empty_skip=%s index_s=%.1f total_s=%.1f",
+            timings["detection_tracking"], timings["frame_embeddings"], timings["crop_embeddings"],
+            timings["frame_read_filter"], kept_frames, skipped_static, skipped_empty,
+            timings["index_building"], total_elapsed,
+        )
         yield {
             "kind": "done",
             "meta": {
@@ -1410,7 +1371,7 @@ class VisionGuardPipeline:
         frames = self.idx.get("frames", [])
         if not frames:
             return []
-        limit = max(1, int(os.getenv("MAX_EXHAUSTIVE_VERIFICATION_FRAMES", "24")))
+        limit = self.settings.max_exhaustive_verification_frames
         if len(frames) <= limit:
             selected = frames
         else:
