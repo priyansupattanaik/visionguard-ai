@@ -21,6 +21,7 @@ STAGE_LABELS = (
     ("frame_metadata_collected", "Frame metadata collected"),
     ("ocr_completed", "OCR completed"),
     ("captions_generated", "Captions generated"),
+    ("semantic_analysis", "NVIDIA semantic analysis"),
     ("embeddings_generated", "Embeddings generated"),
     ("vector_index_updated", "Vector index updated"),
     ("query_ready", "Query ready"),

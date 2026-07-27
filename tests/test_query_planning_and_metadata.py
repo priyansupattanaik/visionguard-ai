@@ -32,8 +32,9 @@ def test_planner_does_not_use_a_finite_object_alias_table():
     )
 
     assert plan.entities == []
-    assert plan.intent == "event_search"
+    assert plan.intent == "unsupported_event"
     assert "visual_semantic" in plan.retrieval_routes
+    assert plan.limitations
 
 
 def test_planner_routes_open_attribute_description_without_guessing_an_object():
@@ -80,6 +81,10 @@ def test_color_metadata_is_generated_for_a_runtime_discovered_class(tmp_path):
 def test_open_query_uses_bounded_visual_verification_when_configured(tmp_path, monkeypatch):
     monkeypatch.setenv("MODEL_PROVIDER", "nvidia")
     monkeypatch.setenv("NVIDIA_API_KEY", "configured-for-test")
+    monkeypatch.setattr(
+        "visionguard.model_services.nvidia_verifier.OpenAICompatibleProvider.health",
+        lambda _self: {"configured": True, "reachable": True, "message": "reachable"},
+    )
     pipe = VisionGuardPipeline(out_dir=str(tmp_path / "output"))
     pipe.model_provider = NoneModelProvider()
     pipe.trk.names = lambda: {0: "known class"}

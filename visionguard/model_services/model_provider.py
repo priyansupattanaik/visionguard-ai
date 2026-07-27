@@ -252,10 +252,22 @@ def model_health_snapshot(provider=None):
     provider = provider or create_model_provider()
     selected = provider.provider_name
     text = provider.health()
-    vision_url = os.getenv("LLAMA_CPP_VISION_URL", "http://127.0.0.1:8081") if selected == "llama_cpp" else ""
-    vision = _probe_optional_endpoint(vision_url) if selected == "llama_cpp" else ProviderHealth(
-        False, False, None, "No vision endpoint is configured for the selected provider."
-    ).to_dict()
+    if selected == "llama_cpp":
+        vision_url = os.getenv("LLAMA_CPP_VISION_URL", "http://127.0.0.1:8081")
+        vision = _probe_optional_endpoint(vision_url)
+    elif selected == "nvidia":
+        # NVIDIA's configured VLM uses the same authenticated multimodal
+        # endpoint as the text-compatible health probe.
+        vision = dict(text)
+        vision["message"] = (
+            "NVIDIA multimodal endpoint is reachable."
+            if vision["reachable"]
+            else "NVIDIA multimodal endpoint is unavailable."
+        )
+    else:
+        vision = ProviderHealth(
+            False, False, None, "No vision endpoint is configured for the selected provider."
+        ).to_dict()
     return {
         "selected_provider": selected,
         "text_model": text,

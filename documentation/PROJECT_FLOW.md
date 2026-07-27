@@ -8,11 +8,11 @@
 2. The user explicitly starts indexing. The pipeline opens the video with Decord and reads every source frame in ascending frame-number order.
 3. Each decoded frame is compared with the immediately preceding decoded frame. It is removed only if its shape, data type, and every pixel are identical. There is no time-based sampling, motion threshold, forced keyframe interval, empty-frame removal, or decoder fallback.
 4. Every retained frame is submitted for source-evidence writing and processed once by YOLO with BoT-SORT tracking. That single inference returns every detector box and adds a track ID where available; no second YOLO detection pass is run.
-5. Evidence-frame writes run concurrently with subsequent CPU work and are checked before their embedding batch is committed. SigLIP embeds every retained frame. Retained frames are grouped into `WIN_SEC` evidence segments for segment-level retrieval; this grouping does not remove frames.
-6. Frame vectors, segment vectors, metadata, and source-frame paths are written into the local evidence index. The video becomes searchable only after this completes.
-7. A user query is normalized by the deterministic query planner. Runtime detector labels and documented aliases determine whether the query uses detector evidence, track-event evidence, semantic evidence, or a clearly marked unsupported/abstaining path.
-8. Retrieval returns evidence segments with a representative stored frame, peak timestamp, start/end timestamps, source classes, and retrieval mode. Detector results are calibrated and grouped into temporal segments rather than presented as isolated frame claims.
-9. Optional visual verification can evaluate retrieval candidates only when explicitly configured. It may confirm or reject a candidate, but cannot create evidence or turn an unsupported request into a confirmed result.
+5. Evidence-frame writes run concurrently with later CPU work. Retained frames are grouped by source timestamps, so deduplication never stretches a `WIN_SEC` segment.
+6. After an authenticated readiness probe, NVIDIA analyzes each representative segment frame. Structured output is stored as an unverified `semantic_description` tied to detector context and a source frame. Failure is terminal; there is no semantic fallback.
+7. The event extractor builds first-observed state, measured movement, observed dwell, and configured zone-transition `event_fact` records. It does not call last observation a disappearance or stationary state movement.
+8. LangGraph routes object, distinct-track count, numeric temporal, implemented event, zone, vector semantic-scene, and explicit-verification requests. Unsupported events abstain rather than falling through to generic semantics.
+9. Explicit verification requires an authenticated reachable verifier. Rejected, unavailable, malformed, or missing verification abstains. Ordinary search never invokes verification implicitly.
 10. The UI/API returns either evidence frames, a timestamped textual answer, or both. Exported clips and reports remain traceable to the stored source evidence.
 
 ```mermaid

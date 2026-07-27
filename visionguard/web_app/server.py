@@ -2,6 +2,10 @@ import json
 import logging
 import os
 import threading
+import time
+import hmac
+import shutil
+from collections import defaultdict, deque
 from pathlib import Path
 from uuid import uuid4
 
@@ -103,7 +107,10 @@ def _register_download(path):
     if safe is None:
         return None
     token = uuid4().hex
-    DOWNLOADS[token] = str(safe)
+    DOWNLOADS[token] = {
+        "path": str(safe),
+        "expires_at": time.monotonic() + max(60.0, float(os.getenv("VISION_GUARD_DOWNLOAD_TTL_SECONDS", "3600"))),
+    }
     return {
         "id": token,
         "name": safe.name,
@@ -127,6 +134,8 @@ def _serialize_match(row, evidence_frame=None):
         "verification_mode": mode,
         "verification_label": _verification_label(mode),
         "low_confidence": bool(row.get("low_confidence")),
+        "evidence_state": row.get("evidence_state", "unknown"),
+        "claim_provenance": row.get("claim_provenance", "unknown"),
     }
     if evidence_frame is not None:
         payload["frame"] = public_frame(evidence_frame)
@@ -151,16 +160,50 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
     app = Flask(__name__, template_folder=str(ROOT / "web_interface" / "templates"), static_folder=str(ROOT / "web_interface" / "static"))
     app.config["TESTING"] = testing
     app.config["PIPELINE"] = pipeline or VisionGuardPipeline()
-    app.config["LOCK"] = threading.RLock()
+    pipeline_lock = threading.RLock()
+    app.config["LOCK"] = pipeline_lock
     app.config["STATE_LOCK"] = threading.RLock()
-    app.config["PROCESS_LOCK"] = threading.Lock()
+    app.config["PROCESS_LOCK"] = pipeline_lock
     app.config["VIDEOS"] = {}
     app.config["JOBS"] = {}
     app.config["PROCESS_THREADS"] = {}
     app.config["ACTIVE_VIDEO_ID"] = None
+    app.config["INDEXING_VIDEO_ID"] = None
     app.config["LAST_QUERY"] = ""
+    max_upload_mb = max(1, int(os.getenv("VISION_GUARD_MAX_UPLOAD_MB", "500")))
+    app.config["MAX_CONTENT_LENGTH"] = max_upload_mb * 1024 * 1024
+    app.config["MAX_VIDEO_DURATION_SECONDS"] = max(1.0, float(os.getenv("VISION_GUARD_MAX_DURATION_SECONDS", "1800")))
+    app.config["MAX_VIDEO_WIDTH"] = max(1, int(os.getenv("VISION_GUARD_MAX_WIDTH", "3840")))
+    app.config["MAX_VIDEO_HEIGHT"] = max(1, int(os.getenv("VISION_GUARD_MAX_HEIGHT", "2160")))
+    app.config["MAX_REGISTERED_VIDEOS"] = max(1, int(os.getenv("VISION_GUARD_MAX_VIDEOS", "20")))
+    request_history = defaultdict(deque)
     OUTPUT_DIR.mkdir(exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    @app.before_request
+    def protect_expensive_api_operations():
+        if testing or not request.path.startswith("/api/") or request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+            return None
+        remote = request.remote_addr or ""
+        is_loopback = remote in {"127.0.0.1", "::1", "localhost"}
+        configured_token = os.getenv("VISION_GUARD_API_TOKEN", "").strip()
+        supplied = request.headers.get("Authorization", "")
+        supplied_token = supplied[7:].strip() if supplied.startswith("Bearer ") else ""
+        if not is_loopback and (not configured_token or not hmac.compare_digest(supplied_token, configured_token)):
+            return jsonify({"ok": False, "message": "Authentication is required for non-loopback API access."}), 401
+        limit = max(1, int(os.getenv("VISION_GUARD_RATE_LIMIT_PER_MINUTE", "60")))
+        now = time.monotonic()
+        history = request_history[remote or "unknown"]
+        while history and now - history[0] >= 60.0:
+            history.popleft()
+        if len(history) >= limit:
+            return jsonify({"ok": False, "message": "API rate limit exceeded; retry later."}), 429
+        history.append(now)
+        return None
+
+    @app.errorhandler(413)
+    def upload_too_large(_error):
+        return jsonify({"ok": False, "message": f"Upload exceeds the {max_upload_mb} MB limit."}), 413
 
     if start_warmup and not testing:
         threading.Thread(target=app.config["PIPELINE"].warmup_models, daemon=True).start()
@@ -168,6 +211,12 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
     def register_video(video_path, filename, source_url):
         path = Path(video_path).resolve()
         metadata = probe_video(path)
+        if metadata["duration_ms"] > app.config["MAX_VIDEO_DURATION_SECONDS"] * 1000:
+            raise ValueError("Video duration exceeds the configured processing limit.")
+        if metadata["width"] > app.config["MAX_VIDEO_WIDTH"] or metadata["height"] > app.config["MAX_VIDEO_HEIGHT"]:
+            raise ValueError("Video resolution exceeds the configured processing limit.")
+        if len(app.config["VIDEOS"]) >= app.config["MAX_REGISTERED_VIDEOS"]:
+            raise ValueError("Video quota reached; remove retained jobs before uploading another video.")
         video_id = f"video_{uuid4().hex}"
         job_id = f"job_{uuid4().hex}"
         job = make_job(job_id, video_id)
@@ -228,7 +277,9 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                         deduplicated = max(0, processed - kept)
                         set_job_stage(job, "duplicates_removed", "running", processed=deduplicated, total=processed, message=f"{deduplicated} exact consecutive duplicate frames removed so far.")
                         set_job_stage(job, "objects_detected", "running", processed=processed, total=total, message=f"Detector processed frame {processed}; {detected} detections on the latest selected frame.")
-                        set_job_stage(job, "frame_metadata_collected", "running", processed=kept, total=total, message="Stored timestamp, detections, tracks, appearances, and motion for each evidence frame.")
+                        set_job_stage(job, "frame_metadata_collected", "running", processed=kept, total=total, message="Stored timestamp, detections, tracks, and appearance metadata for each evidence frame.")
+                    elif event.get("kind") == "semantic_progress":
+                        set_job_stage(job, "semantic_analysis", "running", processed=int(event["processed"]), total=int(event["total"]), message=event.get("message", "NVIDIA semantic segment analysis is running."))
                     elif event.get("kind") == "done":
                         meta = event["meta"]
                         frames = materialize_frames(video_id, pipe)
@@ -244,7 +295,9 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                         decoded_frames = int(meta.get("decoded_frames", len(frames) + removed_duplicates))
                         set_job_stage(job, "duplicates_removed", "completed", processed=removed_duplicates, total=decoded_frames, message=f"Removed {removed_duplicates} exact consecutive duplicates; retained {len(frames)} indexable frames.")
                         set_job_stage(job, "objects_detected", "completed", processed=len(frames), total=len(frames), message=f"YOLO processed {len(frames)} frames and stored {detection_count} detections.")
-                        set_job_stage(job, "frame_metadata_collected", "completed", processed=len(frames), total=len(frames), message="Each evidence frame has its decoder timestamp, detections, tracks, appearances, and motion metadata.")
+                        set_job_stage(job, "frame_metadata_collected", "completed", processed=len(frames), total=len(frames), message="Each evidence frame has its decoder timestamp, detections, tracks, and appearance metadata.")
+                        semantic_segments = int(meta.get("semantic_segments", 0))
+                        set_job_stage(job, "semantic_analysis", "completed", processed=semantic_segments, total=semantic_segments, message=f"NVIDIA returned structured semantic descriptions for {semantic_segments} evidence segments.")
                         set_job_stage(job, "embeddings_generated", "completed", processed=vector_count, total=len(frames), message=f"{meta.get('embedding_mode', 'unknown')} produced nonzero vectors for every evidence frame.")
                         set_job_stage(job, "vector_index_updated", "completed", processed=len(frames), total=len(frames), message=f"Frame and segment indexes stored with backend {meta.get('retriever', 'unknown')}.")
                         set_job_stage(job, "query_ready", "completed", processed=1, total=1, message="Search is enabled because evidence frames and indexes exist.")
@@ -260,7 +313,10 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                             }
                             job["status"] = "completed"
                             job["updated_at"] = utc_now()
+                            if hasattr(pipe, "capture_snapshot"):
+                                video["_snapshot"] = pipe.capture_snapshot()
                             app.config["ACTIVE_VIDEO_ID"] = video_id
+                            app.config["INDEXING_VIDEO_ID"] = None
                         return
                 raise RuntimeError("Video pipeline ended without a completion event.")
         except Exception as exc:
@@ -270,6 +326,8 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                 job["status"] = "failed"
                 job["error"] = str(exc)
                 job["updated_at"] = utc_now()
+                if app.config.get("INDEXING_VIDEO_ID") == video_id:
+                    app.config["INDEXING_VIDEO_ID"] = None
                 for stage in job["stages"]:
                     if stage["status"] == "running":
                         update_stage(job, stage["name"], "failed", message=str(exc))
@@ -288,20 +346,27 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
     def execute_query(query, video_id=None, response_mode="both"):
         pipe = app.config["PIPELINE"]
         video = app.config["VIDEOS"].get(video_id) if video_id else None
+        snapshot = None
         if video is not None:
+            if app.config.get("INDEXING_VIDEO_ID") is not None:
+                return {"ok": False, "message": "An evidence index is currently being built; retry the query after indexing completes."}, 409
             if video["status"] != "searchable":
                 return {"ok": False, "message": "This video is not searchable yet."}, 409
-            if app.config["ACTIVE_VIDEO_ID"] != video_id:
+            snapshot = video.get("_snapshot")
+            if snapshot is None and app.config["ACTIVE_VIDEO_ID"] != video_id:
                 return {"ok": False, "message": "This video is no longer the active in-memory index. Process it again before querying."}, 409
             evidence_frames = video["frames"]
         else:
             evidence_frames = []
-        if not pipe.idx:
-            return {"ok": False, "message": "Scan a video before searching."}, 400
         if not query:
             return {"ok": False, "message": "Enter a query before searching."}, 400
         response_mode = response_mode if response_mode in {"both", "frames", "answer"} else "both"
         with app.config["LOCK"]:
+            if snapshot is not None and hasattr(pipe, "activate_snapshot"):
+                pipe.activate_snapshot(snapshot)
+                app.config["ACTIVE_VIDEO_ID"] = video_id
+            if not pipe.idx:
+                return {"ok": False, "message": "Scan a video before searching."}, 400
             hits = pipe.search(query, top_k=4)
             prepared = pipe.prepare_hits(hits, query)
             app.config["LAST_QUERY"] = query
@@ -344,7 +409,11 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
                     hours, minutes = divmod(int(minutes), 60)
                     object_text = ", ".join(citation["objects"]) or "no detector-labelled objects"
                     evidence_lines.append(f"{hours:02d}:{minutes:02d}:{remainder:06.3f} (frame {citation['frame_id']}): {object_text}.")
-                answer = f'Evidence for "{query}": ' + " ".join(evidence_lines)
+                intent = query_plan.get("intent") if isinstance(query_plan, dict) else None
+                if intent in {"count", "verification_request", "semantic_scene_search"} and query_message:
+                    answer = query_message + " Citations: " + " ".join(evidence_lines)
+                else:
+                    answer = f'Evidence for "{query}": ' + " ".join(evidence_lines)
                 if response_mode == "frames":
                     answer = ""
                     query_message = f'Found {len(frames)} evidence frame(s) for "{query}".'
@@ -440,12 +509,16 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
             abort(404)
         pipe = app.config["PIPELINE"]
         if hasattr(pipe, "model_health"):
-            detector = pipe.model_health(refresh=True).get("detector", {})
+            health = pipe.model_health(refresh=True)
+            detector = health.get("detector", {})
             if detector and not detector.get("ready", False):
                 return jsonify({
                     "ok": False,
                     "message": detector.get("message", "The local YOLO detector is not ready. Bootstrap it before indexing."),
                 }), 409
+            semantic = health.get("semantic", {})
+            if semantic and not semantic.get("ready", False):
+                return jsonify({"ok": False, "message": semantic.get("message", "NVIDIA semantic indexing is not ready.")}), 409
         job = app.config["JOBS"][video["job_id"]]
         with app.config["STATE_LOCK"]:
             if job["status"] == "completed":
@@ -456,6 +529,7 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
             video["updated_at"] = utc_now()
             job["status"] = "running"
             job["updated_at"] = utc_now()
+            app.config["INDEXING_VIDEO_ID"] = video_id
         launch_processing(video, job)
         return jsonify({"ok": True, "video_id": video_id, "job_id": job["job_id"], "status": "processing", "message": "Indexing started."}), 202
 
@@ -476,6 +550,41 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
             "frame_count_indexed": len(video["frames"]),
             "processing": video.get("processing", {}),
         })
+
+    @app.delete("/api/videos/<video_id>")
+    def api_video_delete(video_id):
+        video = app.config["VIDEOS"].get(video_id)
+        if video is None:
+            abort(404)
+        if video["status"] == "processing" or app.config.get("INDEXING_VIDEO_ID") == video_id:
+            return jsonify({"ok": False, "message": "A video cannot be removed while indexing is running."}), 409
+        removed = []
+        with app.config["STATE_LOCK"]:
+            app.config["VIDEOS"].pop(video_id, None)
+            app.config["JOBS"].pop(video["job_id"], None)
+            app.config["PROCESS_THREADS"].pop(video["job_id"], None)
+            if app.config.get("ACTIVE_VIDEO_ID") == video_id:
+                app.config["ACTIVE_VIDEO_ID"] = None
+        source = Path(video["_path"]).resolve()
+        try:
+            source.relative_to(UPLOAD_DIR.resolve())
+        except ValueError:
+            pass
+        else:
+            if source.is_file():
+                source.unlink()
+                removed.append(source.name)
+        snapshot = video.get("_snapshot") or {}
+        run_dir = Path(snapshot.get("run_dir", "")).resolve() if snapshot.get("run_dir") else None
+        if run_dir is not None:
+            try:
+                run_dir.relative_to(OUTPUT_DIR.resolve())
+            except ValueError:
+                run_dir = None
+        if run_dir is not None and run_dir.is_dir() and run_dir != OUTPUT_DIR.resolve():
+            shutil.rmtree(run_dir)
+            removed.append(run_dir.name)
+        return jsonify({"ok": True, "video_id": video_id, "removed": removed})
 
     @app.get("/api/model/health")
     def api_model_health():
@@ -694,10 +803,11 @@ def create_app(testing=False, start_warmup=True, pipeline=None):
 
     @app.get("/api/download/<download_id>")
     def api_download(download_id):
-        path = DOWNLOADS.get(download_id)
-        if not path:
+        record = DOWNLOADS.get(download_id)
+        if not record or time.monotonic() >= float(record["expires_at"]):
+            DOWNLOADS.pop(download_id, None)
             abort(404)
-        safe = _safe_output_file(path)
+        safe = _safe_output_file(record["path"])
         if safe is None:
             abort(404)
         return send_file(safe, as_attachment=True, download_name=safe.name)

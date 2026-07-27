@@ -6,7 +6,8 @@
 | `visionguard/video_pipeline/` | Video reading, scan orchestration, vector indexing, and model-free detector evidence segmentation |
 | `visionguard/model_services/` | Model adapters for detection/tracking, embeddings, verification, segmentation, clips, and reports |
 | `visionguard/runtime/` | Environment loading, validated pipeline settings, logging, device selection, and cache configuration |
-| `visionguard/search/` | Detector-aware query planning and language/event rules; no object catalog |
+| `visionguard/search/` | LangGraph query orchestration, deterministic intent planning, and query rules |
+| `visionguard/semantic/` | Required NVIDIA semantic segment adapter and detector-grounded event graph |
 | `visionguard/web_app/` | Flask routes plus real video/job/chunk/frame state contracts |
 | `web_interface/templates/` | Operational video-interface HTML |
 | `web_interface/static/` | Operational CSS and JavaScript |

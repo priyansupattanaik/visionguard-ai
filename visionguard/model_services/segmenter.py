@@ -32,7 +32,7 @@ class GroundedSegmenter:
         boxes = self.ver.ground_phrase(frame_path, query.strip().lower())
         if not boxes:
             boxes = fallback_boxes or []
-        scores = [max(0.15, 1.0 - 0.08 * i) for i in range(len(boxes))]
+        scores = [None for _ in boxes]
         texts = [query.strip().lower()] * len(boxes)
         return boxes, scores, texts
 
@@ -63,7 +63,8 @@ class GroundedSegmenter:
                 lay[m] = c
                 out = cv2.addWeighted(out, 1.0, lay, 0.35, 0)
             cv2.rectangle(out, (x1, y1), (x2, y2), c, 2)
-            cv2.putText(out, f"{scores[i]:.2f}", (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, c, 2, cv2.LINE_AA)
+            if i < len(scores) and scores[i] is not None:
+                cv2.putText(out, f"{scores[i]:.2f}", (x1, max(22, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, c, 2, cv2.LINE_AA)
         return out
 
     def segment_clip(self, video, query, out_path, frame_dir, stride=3, fallback_boxes=None):
@@ -75,6 +76,9 @@ class GroundedSegmenter:
         if os.path.exists(tmp):
             os.remove(tmp)
         out = cv2.VideoWriter(tmp, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+        if not out.isOpened():
+            cap.release()
+            raise RuntimeError(f"Unable to create segmented video: {tmp}")
         prev = None
         picks = []
         seen = 0
@@ -89,7 +93,7 @@ class GroundedSegmenter:
             if i % stride == 0:
                 frame_path = os.path.join(frame_dir, f"segment_src_{i:05d}.jpg")
                 cv2.imwrite(frame_path, frame)
-                boxes, scores, _ = self.detect(frame_path, query, fallback_boxes=fallback_boxes)
+                boxes, scores, _ = self.detect(frame_path, query, fallback_boxes=None)
                 masks = self.segment(frame, boxes[:2]) if boxes else []
                 prev = self.overlay(frame, boxes[:2], scores[:2], masks)
                 if boxes:
@@ -97,7 +101,10 @@ class GroundedSegmenter:
                     p = os.path.join(frame_dir, f"seg_{i:05d}.jpg")
                     cv2.imwrite(p, prev)
                     picks.append(p)
-            out.write(prev if prev is not None else frame)
+                output_frame = prev
+            else:
+                output_frame = frame
+            out.write(output_frame)
             i += 1
         cap.release()
         out.release()

@@ -27,7 +27,8 @@ from visionguard.video_pipeline.video_reader import DecordVideoReader
 from visionguard.video_pipeline.detector_evidence import DetectorEvidenceRetriever
 from visionguard.video_pipeline.frame_dedup import is_exact_duplicate
 from visionguard.model_services.vlm import SearchEncoder
-from visionguard.search import DeterministicQueryPlanner
+from visionguard.search import DeterministicQueryPlanner, VideoQueryGraph
+from visionguard.semantic import EventExtractor, NvidiaSemanticAnalyzer, SemanticAnalysisError
 
 setup_cache()
 logger = logging.getLogger(__name__)
@@ -45,6 +46,16 @@ class VisionGuardPipeline:
         self.trk = ObjectTracker(model=os.getenv("YOLO_MODEL") or yolo)
         self.enc = SearchEncoder(model=os.getenv("CLIP_MODEL") or clip_model)
         self.query_planner = DeterministicQueryPlanner()
+        self.query_graph = VideoQueryGraph(
+            self.query_planner,
+            self._graph_object_evidence,
+            self._graph_event_evidence,
+            self._graph_zone_evidence,
+            self._graph_semantic_evidence,
+            verify=self._graph_verify_evidence,
+            retrieve_count=self._graph_count_evidence,
+            retrieve_temporal=self._graph_temporal_evidence,
+        )
         self.model_provider = create_model_provider()
         self._model_health_cache = (0.0, None)
         self.vlm = self.enc
@@ -71,6 +82,7 @@ class VisionGuardPipeline:
         self.last_query_plan = None
         self.last_query_message = ""
         self._warmup_done = False
+        self.semantic_events = []
 
     def _color_words(self):
         return {
@@ -282,12 +294,9 @@ class VisionGuardPipeline:
         if not src:
             row["gallery_frame"] = src
             return row
-        try:
-            boxes = self.ver.ground_phrase(src, query, frame_key=row.get("cache_key"))
-        except Exception:
-            boxes = []
+        boxes = row.get("det_boxes", [])
         if not boxes:
-            boxes = row.get("det_boxes", [])
+            boxes = [item.get("box") for item in row.get("matched_detections", []) if item.get("box")]
         if boxes:
             stamp = int(round(row.get("peak_ts", row.get("start", 0.0)) * 100))
             row["gallery_frame"] = self._draw_boxes(src, boxes, f"gallery_{row.get('match_id', 0):02d}_{stamp:06d}.jpg", label_text=f"{query} @ {row.get('peak_ts', row.get('start', 0.0)):.2f}s")
@@ -857,15 +866,12 @@ class VisionGuardPipeline:
         # Compute track statistics from accumulated tracking data
         track_stats = self.trk.compute_track_stats(fps=fps)
         self.track_stats = track_stats
-        block = max(1, int(round(win_sec / frame_interval_sec)))
         segs = []
         seg_vec_chunks = []
         seg_id_chunks = []
         seg_chunk_vecs = []
         seg_chunk_ids = []
-        for lo in range(0, len(frames), block):
-            hi = min(len(frames), lo + block)
-            chunk = frames[lo:hi]
+        for chunk in self._group_frames_by_time(frames, win_sec):
             emb = np.mean([np.asarray(x["emb"], dtype=np.float32).reshape(-1) for x in chunk], axis=0).astype(np.float32)
             emb = emb / max(float(np.linalg.norm(emb)), 1e-6)
             emb = emb.astype(np.float32)
@@ -935,6 +941,40 @@ class VisionGuardPipeline:
             ],
             "segments": segs,
         }
+        # Semantic enrichment is a required stage. It is intentionally invoked
+        # after evidence-frame writes complete, so every caption remains tied to
+        # a durable source image and an exact segment interval.
+        analyzer = NvidiaSemanticAnalyzer(
+            api_key=os.getenv("NVIDIA_API_KEY", ""),
+            base_url=os.getenv("NVIDIA_API_BASE_URL", ""),
+            model=os.getenv("NVIDIA_VLM_MODEL", ""),
+            timeout=float(os.getenv("NVIDIA_API_TIMEOUT", "30")),
+        )
+        semantic_started = time.perf_counter()
+        semantic_total = len(self.idx["segments"])
+        for semantic_index, segment in enumerate(self.idx["segments"], 1):
+            semantic = analyzer.analyze(
+                segment["frame_path"],
+                objects=segment["objects"],
+                tracks=segment["tracks"],
+                start=segment["start"],
+                end=segment["end"],
+            ).to_dict()
+            semantic["evidence_state"] = "semantic_description"
+            semantic["claim_provenance"] = "nvidia_semantic"
+            semantic["supporting_frame_path"] = segment["frame_path"]
+            semantic["detector_context"] = {"objects": list(segment["objects"]), "tracks": list(segment["tracks"])}
+            segment["semantic"] = semantic
+            segment["tags"] = sorted(set(semantic["scene_tags"]) | set(semantic["event_tags"]))
+            yield {"kind": "semantic_progress", "processed": semantic_index, "total": semantic_total,
+                   "message": f"NVIDIA semantic analysis completed segment {semantic_index} of {semantic_total}."}
+        timings["semantic_analysis"] = time.perf_counter() - semantic_started
+        extractor = EventExtractor(self.settings.semantic_zones, self.settings.semantic_min_dwell_seconds)
+        self.semantic_events = extractor.extract(self.idx["frames"], vr.width, vr.height)
+        self.idx["events"] = self.semantic_events
+        self.idx["meta"]["semantic_provider"] = "nvidia"
+        self.idx["meta"]["semantic_segments"] = len(self.idx["segments"])
+        self.idx["meta"]["event_count"] = len(self.semantic_events)
         from collections import Counter
 
         _obj_counter = Counter()
@@ -943,7 +983,7 @@ class VisionGuardPipeline:
                 _obj_counter[_obj] += 1
 
         self.idx["meta"]["object_counts"] = dict(_obj_counter.most_common())
-        self.idx["meta"]["total_detections"] = sum(_obj_counter.values())
+        self.idx["meta"]["total_detections"] = sum(len(row.get("detections", [])) for row in self.idx["frames"])
         self.idx["meta"]["unique_objects"] = len(_obj_counter)
         frame_chunks = list(zip(frame_vec_chunks, frame_id_chunks))
         seg_chunks = list(zip(seg_vec_chunks, seg_id_chunks))
@@ -991,9 +1031,11 @@ class VisionGuardPipeline:
                         "tracks": x["tracks"],
                         "temporal_stats": x["temporal_stats"],
                         "tags": x["tags"],
+                        "semantic": x.get("semantic", {}),
                     }
                     for x in segs
                 ],
+                "events": self.semantic_events,
             },
         )
         # Generate zero-query analysis
@@ -1146,6 +1188,14 @@ class VisionGuardPipeline:
             return cached
         snapshot = model_health_snapshot(self.model_provider)
         snapshot["detector"] = self.trk.model_status()
+        try:
+            analyzer = NvidiaSemanticAnalyzer(
+                api_key=os.getenv("NVIDIA_API_KEY", ""), base_url=os.getenv("NVIDIA_API_BASE_URL", ""),
+                model=os.getenv("NVIDIA_VLM_MODEL", ""), timeout=float(os.getenv("NVIDIA_API_TIMEOUT", "30")),
+            )
+            snapshot["semantic"] = analyzer.health()
+        except SemanticAnalysisError as exc:
+            snapshot["semantic"] = {"ready": False, "provider": "nvidia", "message": str(exc)}
         self._model_health_cache = (time.monotonic(), snapshot)
         return snapshot
 
@@ -1539,41 +1589,226 @@ class VisionGuardPipeline:
             time.sleep(min(self.verifier_poll_interval, remaining))
 
     def search_stream(self, raw_q, top_k=4):
-        q, _, qobjs, candidates, verify_n = self._candidate_hits(raw_q, top_k=top_k)
-        if not candidates:
-            yield []
-            return
-        self._wait_for_verifier()
-        working = [dict(x) for x in candidates]
-        confirmed = []
-        emitted = set()
-        for idx, row in self._verify_rows_stream(working, q, top_n=verify_n):
-            if row.get("verified_match"):
-                confirmed = sorted(self._confirmed_rows(working), key=lambda x: x["score"], reverse=True)[:top_k]
-                key = tuple(x.get("cache_key") for x in confirmed)
-                if key not in emitted:
-                    emitted.add(key)
-                    yield confirmed
-        if not emitted:
-            trusted = [x for x in working if x.get("retrieval_mode") in {"detector", "object_fallback", "metadata_frame", "metadata_segment"}]
-            if qobjs and trusted:
-                yield sorted(trusted, key=lambda x: x["score"], reverse=True)[:top_k]
+        """Compatibility iterator backed by the same LangGraph query path."""
+        yield self.search(raw_q, top_k=top_k)
+
+    def _graph_object_evidence(self, plan, top_k):
+        return self._refine_detector_hits(plan["normalized_query"], top_k)
+
+    def _graph_count_evidence(self, plan, top_k):
+        wanted = set(plan.get("entities", []))
+        if not wanted:
+            return []
+        by_track = {}
+        for frame in self.idx.get("frames", []):
+            for detection in frame.get("detections", []):
+                track_id = detection.get("track_id")
+                if track_id is None or detection.get("name") not in wanted:
+                    continue
+                candidate = (float(detection.get("conf", 0.0)), frame, detection)
+                if track_id not in by_track or candidate[0] > by_track[track_id][0]:
+                    by_track[int(track_id)] = candidate
+        count = len(by_track)
+        if not count:
+            return []
+        rows = []
+        for track_id, (confidence, frame, detection) in sorted(by_track.items()):
+            rows.append({
+                "query": plan["query"], "score": confidence, "retrieval_mode": "distinct_track_count",
+                "cache_key": f"count:{track_id}:{frame['frame_id']}", "start": frame["ts"], "end": frame["ts"],
+                "peak_ts": frame["ts"], "frame_path": frame["frame_path"],
+                "representative_frame_path": frame["frame_path"], "objects": [detection["name"]],
+                "tracks": [track_id], "det_boxes": [detection.get("box", [])], "count": count,
+                "summary": f"Distinct tracked {detection['name']} {track_id}",
+                "evidence_state": "detector_fact", "claim_provenance": "yolo_botsort",
+            })
+        return rows[:max(top_k, count)]
+
+    def _graph_temporal_evidence(self, plan, top_k):
+        query = plan["normalized_query"]
+        relation = plan.get("temporal_relation", "none")
+        numeric = [float(value) for value in re.findall(r"\d+(?:\.\d+)?", query)]
+        lower, upper = 0.0, float(self.idx.get("meta", {}).get("duration", 0.0))
+        if relation == "between" and len(numeric) >= 2:
+            lower, upper = sorted(numeric[:2])
+        elif relation == "before" and numeric:
+            upper = numeric[0]
+        elif relation == "after" and numeric:
+            lower = numeric[0]
+        else:
+            terms = set(query.split())
+            if {"enter", "entered", "entering"} & terms:
+                required_type = "zone_entered"
+            elif {"exit", "exited", "exiting", "leave", "leaving"} & terms:
+                required_type = "zone_exited"
+            elif {"dwell", "stay", "stayed"} & terms:
+                required_type = "track_dwell"
+            elif {"move", "moved", "movement"} & terms:
+                required_type = "track_moved"
             else:
-                yield []
+                return []
+            reference_clause = query.split(relation, 1)[1].strip() if relation in query else ""
+            detector_labels = sorted({label for frame in self.idx.get("frames", []) for label in frame.get("objects", [])})
+            reference_entities = set(self.query_planner.resolve_entities(reference_clause, detector_labels))
+            reference_events = [
+                event for event in self.idx.get("events", [])
+                if event.get("type") == required_type
+                and (not reference_entities or event.get("class_name") in reference_entities)
+            ]
+            if not reference_events:
+                return []
+            timestamps = sorted(float(event["timestamp"]) for event in reference_events)
+            if relation == "before":
+                upper = timestamps[0]
+            elif relation == "after":
+                lower = timestamps[-1]
+            else:
+                return []
+        target_clause = query.split(relation, 1)[0].strip()
+        target_plan = self.query_planner.plan(target_clause, sorted({label for frame in self.idx.get("frames", []) for label in frame.get("objects", [])}))
+        candidates = self._graph_object_evidence(target_plan.to_dict(), max(top_k * 8, 32)) if target_plan.entities else []
+        return [row for row in candidates if lower <= float(row["peak_ts"]) <= upper][:top_k]
+
+    @staticmethod
+    def _group_frames_by_time(frames, window_seconds):
+        groups = []
+        for frame in sorted(frames, key=lambda row: float(row["ts"])):
+            if not groups or float(frame["ts"]) - float(groups[-1][0]["ts"]) >= float(window_seconds):
+                groups.append([frame])
+            else:
+                groups[-1].append(frame)
+        return groups
+
+    def _graph_event_evidence(self, plan, top_k):
+        query_terms = set(plan["normalized_query"].split())
+        wanted_objects = set(plan.get("entities", []))
+        required_types = set()
+        if {"enter", "entered", "entering"} & query_terms:
+            required_types.add("zone_entered")
+        if {"exit", "exited", "exiting"} & query_terms:
+            required_types.add("zone_exited")
+        if {"dwell", "stay", "stayed"} & query_terms:
+            required_types.add("track_dwell")
+        if {"move", "moved", "movement", "direction"} & query_terms:
+            required_types.add("track_moved")
+        events = []
+        for event in self.idx.get("events", []):
+            event_terms = set(event["type"].replace("_", " ").split())
+            if wanted_objects and event.get("class_name") not in wanted_objects:
+                continue
+            if required_types and event["type"] not in required_types:
+                continue
+            if query_terms and not (query_terms & event_terms or {"enter", "exit", "movement", "dwell", "stay"} & query_terms):
+                continue
+            events.append({"query": plan["query"], "score": 1.0, "retrieval_mode": "event_graph",
+                           "cache_key": f"event:{event['event_id']}", "start": event["timestamp"], "end": event["timestamp"],
+                           "peak_ts": event["timestamp"], "frame_path": event["frame_path"],
+                           "representative_frame_path": event["frame_path"], "objects": [event["class_name"]],
+                           "tracks": [event["track_id"]], "tags": [event["type"]], "event": event,
+                           "evidence_state": "event_fact", "claim_provenance": "yolo_botsort_event_graph",
+                           "summary": f"{event['type']} for track {event['track_id']} at {event['timestamp']:.3f}s"})
+        return events[:top_k]
+
+    def _graph_zone_evidence(self, plan, top_k):
+        terms = set(plan["normalized_query"].split())
+        return [row for row in self._graph_event_evidence(plan, max(top_k * 4, 12))
+                if row["event"]["type"] in {"zone_entered", "zone_exited"}
+                and (not row["event"].get("zone") or row["event"]["zone"].casefold() in terms)][:top_k]
+
+    def _graph_semantic_evidence(self, plan, top_k):
+        if not self.idx.get("segments"):
+            return []
+        query_vector = self._embed_query(plan["normalized_query"])
+        scores, segment_ids = self.search_idx.search(query_vector, k=max(1, top_k))
+        by_id = {int(segment["seg_id"]): segment for segment in self.idx.get("segments", [])}
+        rows = []
+        for score, segment_id in zip(scores, segment_ids):
+            if float(score) < self.settings.minimum_vector_similarity:
+                continue
+            segment = by_id.get(int(segment_id))
+            if segment is None:
+                continue
+            semantic = segment.get("semantic") or {}
+            rows.append({"query": plan["query"], "score": float(score), "retrieval_mode": "vector_segment",
+                         "segment_id": int(segment["seg_id"]),
+                         "cache_key": f"semantic:{int(segment['seg_id'])}", "start": segment["start"], "end": segment["end"],
+                         "peak_ts": segment["mid"], "frame_path": segment["frame_path"],
+                         "representative_frame_path": segment["frame_path"], "objects": segment["objects"], "tracks": segment["tracks"],
+                         "tags": segment.get("tags", []), "semantic": semantic, "summary": semantic.get("caption", ""),
+                         "evidence_state": "semantic_description", "claim_provenance": "nvidia_semantic"})
+        return sorted(rows, key=lambda row: row["score"], reverse=True)[:top_k]
+
+    def _graph_verify_evidence(self, query, evidence):
+        if not evidence:
+            return {"state": "no_candidates", "confirmed": False, "evidence": []}
+        if not self.ver.is_ready():
+            return {"state": "unavailable", "confirmed": False, "evidence": []}
+        confirmed = []
+        video_identity = os.path.abspath(self.idx.get("video", "")) if self.idx else ""
+        for row in evidence:
+            frame_path = row.get("representative_frame_path") or row.get("frame_path")
+            result = self.ver.verify_query(
+                frame_path,
+                query,
+                frame_key=f"{video_identity}:{row.get('cache_key', frame_path)}",
+            )
+            if not result.get("matched"):
+                continue
+            verified = dict(row)
+            verified["verified_match"] = True
+            verified["verification_mode"] = result.get("verification_mode", self.verification_mode())
+            verified["verify_score"] = float(result.get("confidence", 0.0))
+            verified["verified_caption"] = str(result.get("caption", ""))
+            verified["det_boxes"] = list(result.get("boxes", []))
+            verified["evidence_state"] = "verified_claim"
+            verified["claim_provenance"] = verified["verification_mode"]
+            confirmed.append(verified)
+        return {
+            "state": "confirmed" if confirmed else "rejected",
+            "confirmed": bool(confirmed),
+            "evidence": confirmed,
+        }
+
+    def capture_snapshot(self):
+        """Capture all query-critical state without sharing mutable vector indexes."""
+        if not self.idx:
+            raise RuntimeError("Cannot snapshot an empty index.")
+        return {
+            "idx": self.idx,
+            "frame_idx": self.frame_idx.snapshot(),
+            "search_idx": self.search_idx.snapshot(),
+            "crop_idx": self.crop_idx.snapshot(),
+            "crop_meta": list(self.crop_meta),
+            "semantic_events": list(self.semantic_events),
+            "track_stats": dict(self.track_stats),
+            "run_dir": self.run_dir,
+            "zero_query": self.zero_query,
+            "clip": self.clip,
+            "rep": self.rep,
+        }
+
+    def activate_snapshot(self, snapshot):
+        """Atomically restore one video's immutable query/export state."""
+        self.idx = snapshot["idx"]
+        self.frame_idx = snapshot["frame_idx"]
+        self.search_idx = snapshot["search_idx"]
+        self.crop_idx = snapshot["crop_idx"]
+        self.crop_meta = list(snapshot["crop_meta"])
+        self.semantic_events = list(snapshot["semantic_events"])
+        self.track_stats = dict(snapshot["track_stats"])
+        self.run_dir = snapshot["run_dir"]
+        self.zero_query = snapshot["zero_query"]
+        self.clip = snapshot["clip"]
+        self.rep = snapshot["rep"]
 
     def search(self, q, top_k=4):
-        checked_q, _, qobjs, candidates, verify_n = self._candidate_hits(q.strip(), top_k=top_k)
-        if not candidates:
+        if not self.idx:
             return []
-        self._wait_for_verifier()
-        checked = self._verify_rows(candidates, checked_q, top_n=verify_n)
-        confirmed = self._confirmed_rows(checked)[:top_k]
-        if confirmed:
-            return confirmed
-        trusted = [x for x in checked if x.get("retrieval_mode") in {"detector", "object_fallback", "metadata_frame", "metadata_segment"}]
-        if qobjs and trusted:
-            return sorted(trusted, key=lambda x: x["score"], reverse=True)[:top_k]
-        return []
+        detector_labels = sorted({label for frame in self.idx.get("frames", []) for label in frame.get("objects", [])})
+        result = self.query_graph.invoke(q.strip(), detector_labels, top_k=top_k)
+        self.last_query_plan = result.get("plan")
+        self.last_query_message = result.get("answer", "")
+        return result.get("evidence", [])
 
     def prepare_hits(self, hits, query):
         out = []

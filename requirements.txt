@@ -12,10 +12,12 @@ opencv-python>=4.9.0.80
 numpy>=1.26.4
 Pillow>=10.3.0
 jinja2>=3.1.0
+langgraph>=1.2.0,<2.0.0
 
 # Testing
 pytest>=8.0.0
 pygments>=2.18.0
+websocket-client>=1.8.0
 
 # Legacy/optional (for legacy/app_gradio.py)
 # gradio>=5.0.0

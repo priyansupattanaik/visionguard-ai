@@ -57,5 +57,6 @@ class DetectorEvidenceRetriever:
             "objects": labels, "tracks": tracks,
             "appearances": sorted({tag for row in group for tag in row["appearances"]}),
             "matched_detections": peak["matched_detections"], "tags": [],
+            "evidence_state": "detector_fact", "claim_provenance": "yolo_botsort",
             "summary": f"detector-evidence segment {start:.2f}s-{end:.2f}s | detected: {', '.join(labels)}",
         }

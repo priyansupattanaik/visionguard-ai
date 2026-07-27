@@ -3,7 +3,7 @@ import json
 import os
 import zipfile
 from datetime import datetime
-from jinja2 import Template
+from jinja2 import Environment, select_autoescape
 
 
 class ReportGenerator:
@@ -28,7 +28,7 @@ class ReportGenerator:
                     "start": round(row.get("start", 0.0), 2),
                     "end": round(row.get("end", 0.0), 2),
                     "duration": round(row.get("end", 0.0) - row.get("start", 0.0), 2),
-                    "summary": row.get("summary", ""),
+                    "summary": self._spreadsheet_safe(row.get("summary", "")),
                     "objects": ", ".join(row.get("objects", [])),
                     "tracks": ", ".join(str(x) for x in row.get("tracks", [])),
                     "clip": row.get("clip", ""),
@@ -36,7 +36,8 @@ class ReportGenerator:
         return path
 
     def write_html(self, path, data):
-        tpl = Template(
+        environment = Environment(autoescape=select_autoescape(default=True, default_for_string=True))
+        tpl = environment.from_string(
             """
 <!doctype html>
 <html>
@@ -100,6 +101,11 @@ class ReportGenerator:
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
         return path
+
+    @staticmethod
+    def _spreadsheet_safe(value):
+        text = str(value or "")
+        return "'" + text if text.startswith(("=", "+", "-", "@")) else text
 
     def write_zip(self, path, files):
         seen = set()

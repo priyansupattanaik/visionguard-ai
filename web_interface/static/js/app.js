@@ -9,7 +9,9 @@
     frames: [],
     lastEventId: 0,
     searchable: false,
-    detectorReady: true,
+    detectorReady: false,
+    semanticReady: false,
+    previewBlobUrl: null,
   };
 
   const $ = (selector) => document.querySelector(selector);
@@ -123,7 +125,9 @@
       const textModel = data.text_model || {};
       const visionModel = data.vision_model || {};
       const detector = data.detector || {};
+      const semantic = data.semantic || {};
       state.detectorReady = detector.ready !== false;
+      state.semanticReady = semantic.ready !== false;
       setCapability(
         els.textModelStatus,
         textModel.reachable ? "Connected" : (textModel.configured ? "Disconnected" : "Disabled"),
@@ -139,6 +143,8 @@
       if (els.modelNotice) {
         els.modelNotice.textContent = !state.detectorReady
           ? (detector.message || "The local YOLO detector is unavailable. Run scripts\\bootstrap_models.py before indexing.")
+          : !state.semanticReady
+            ? (semantic.message || "NVIDIA semantic indexing is unavailable. Configure NVIDIA_API_KEY before indexing.")
           : textModel.reachable
           ? `${providerLabel(data.selected_provider)} text reasoning is connected. Evidence rules remain enforced by the backend.`
           : `${textModel.message || "The selected text model is unavailable"} Video upload, frame extraction, and detector-backed object search remain available.`;
@@ -284,6 +290,10 @@
   }
 
   function showVideoPreview(url, name) {
+    if (state.previewBlobUrl && state.previewBlobUrl !== url) {
+      URL.revokeObjectURL(state.previewBlobUrl);
+      state.previewBlobUrl = null;
+    }
     if (!url || !els.videoPreview) return;
     els.videoPreview.src = url;
     els.videoPreviewWrap.style.display = "";
@@ -322,11 +332,30 @@
   }
 
   async function pollProcessing() {
+    let consecutiveStatusFailures = 0;
     while (true) {
-      const status = await fetchJson(`/api/videos/${state.videoId}/status`);
+      let status;
+      try {
+        status = await fetchJson(`/api/videos/${state.videoId}/status`);
+        consecutiveStatusFailures = 0;
+      } catch (error) {
+        consecutiveStatusFailures += 1;
+        setMessage(els.scanStatus, `Processing status temporarily unavailable (${consecutiveStatusFailures}/5): ${error.message}`, "scanning");
+        if (consecutiveStatusFailures >= 5) throw error;
+        await waitForPoll(1000);
+        continue;
+      }
       renderStages(status.stages);
-      await loadJobEvents();
-      await refreshFrames();
+      try {
+        await loadJobEvents();
+      } catch (error) {
+        console.warn("Backend event refresh failed; authoritative status polling will continue.", error);
+      }
+      try {
+        await refreshFrames();
+      } catch (error) {
+        console.warn("Evidence thumbnail refresh failed; authoritative status polling will continue.", error);
+      }
       const percent = stageProgress(status.stages);
       const running = status.stages.find((stage) => stage.status === "running");
       showProgress(percent, running ? `${running.label}: ${running.processed}/${running.total || "?"}` : status.status);
@@ -367,13 +396,13 @@
       state.videoId = upload.video_id;
       state.jobId = upload.job_id;
       showVideoPreview(upload.source_url, upload.filename);
-      if (els.indexButton) els.indexButton.disabled = !state.detectorReady;
+      if (els.indexButton) els.indexButton.disabled = !state.detectorReady || !state.semanticReady;
       setMessage(
         els.scanStatus,
-        state.detectorReady
+        state.detectorReady && state.semanticReady
           ? "Upload complete. Review the video, then start evidence indexing."
-          : "Upload complete, but indexing is unavailable until the local YOLO model is bootstrapped.",
-        state.detectorReady ? "success" : "error",
+          : "Upload complete, but indexing is unavailable until required detector and NVIDIA semantic services are ready.",
+        state.detectorReady && state.semanticReady ? "success" : "error",
       );
       showProgress(0, "Upload complete — ready to index");
     } catch (error) {
@@ -435,7 +464,9 @@
       const summary = document.createElement("span");
       summary.textContent = match.summary;
       const mode = document.createElement("small");
-      mode.textContent = `${match.verification_label} · score ${match.score}`;
+      const provenance = match.claim_provenance || "unknown provenance";
+      const evidenceState = (match.evidence_state || "unknown").replaceAll("_", " ");
+      mode.textContent = `${evidenceState} · ${provenance} · ranking score ${match.score}`;
       content.append(title, summary, mode);
       content.addEventListener("click", () => inspectFrame(match.frame, true));
       card.append(checkbox, image, content);
@@ -525,7 +556,8 @@
     if (!els.videoUpload.files.length) return;
     const file = els.videoUpload.files[0];
     els.fileUploadZone.querySelector("span").textContent = file.name;
-    showVideoPreview(URL.createObjectURL(file), file.name);
+    state.previewBlobUrl = URL.createObjectURL(file);
+    showVideoPreview(state.previewBlobUrl, file.name);
   });
   els.fileUploadZone?.addEventListener("dragover", (event) => { event.preventDefault(); els.fileUploadZone.classList.add("dragover"); });
   els.fileUploadZone?.addEventListener("dragleave", () => els.fileUploadZone.classList.remove("dragover"));

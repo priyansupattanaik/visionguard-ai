@@ -1,6 +1,6 @@
 # VisionGuard
 
-VisionGuard is a local-first CCTV evidence retrieval system. It turns a video into timestamped, inspectable evidence and refuses to present a retrieval candidate as a verified fact.
+VisionGuard is an evidence-first CCTV semantic retrieval system. It turns a video into timestamped, inspectable event and scene evidence and refuses to claim an event without stored source evidence.
 
 ## What it does
 
@@ -8,17 +8,17 @@ The operational path is deterministic:
 
 ```text
 ingest → decode every frame → exact consecutive deduplication → detect → track → evidence segments
-      → embeddings/indexes → intent routing → retrieval → optional verification
+      → embeddings/vector indexes → intent routing → detector/event/vector retrieval → explicit verification
       → timestamped frame/clip export
 ```
 
 Each decoded frame is examined in source order. A frame is removed only when every pixel matches the immediately preceding decoded frame; no fixed-second sampling, motion threshold, empty-frame suppression, or forced keyframe interval is used. Each retained frame keeps its decoder timestamp, source frame number, detector boxes, confidences, track IDs, and appearance tags.
 
-## Modes
+## Required semantic path
 
-The default local mode uses YOLO for object evidence, tracking, calibrated detector-segment retrieval, and deterministic query aliases such as `vehicles` and `pedestrians`. It works without a language model.
+NVIDIA multimodal analysis is the required semantic stage, and readiness requires an authenticated live provider probe. Every source-time-bounded segment receives a structured description, scene tags, event tags, provider confidence, and source-frame reference. These fields remain `semantic_description`, not verified facts. Invalid or unavailable NVIDIA responses fail indexing explicitly.
 
-If SigLIP weights are installed locally, VisionGuard also performs text-to-frame semantic retrieval. If a separately configured verifier is reachable, it can check bounded visual candidates. Those external/optional modes are clearly labelled in the UI. Without them, unsupported open-ended requests abstain instead of claiming a result.
+YOLO and BoT-SORT provide `detector_fact` evidence. The event graph emits first-observed state, measured movement, observed dwell, and configured zone transitions as `event_fact`. Last observation at video end is not disappearance, stationary tracks are not movement, and zone transitions require observed membership changes.
 
 ## Setup
 
@@ -29,6 +29,7 @@ Set-Location "D:\CDAC PROJECT\visionguard-ai"
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
+notepad .env  # Set NVIDIA_API_KEY; keep SEMANTIC_PROVIDER=nvidia
 .\.venv\Scripts\python.exe scripts\bootstrap_models.py --yolo yolo11m.pt
 .\.venv\Scripts\python.exe run.py
 ```
@@ -39,9 +40,9 @@ The bootstrap command downloads a model into ignored `.models/`; it is intention
 
 ## Query contract
 
-Exact detector classes and documented aliases use detector evidence. A returned result contains the evidence interval, timestamp, stored frame, and detected classes. `answer` mode returns text with exact timestamps; `frames` mode returns only evidence frames; `both` returns both.
+The LangGraph query brain routes object, count, numeric temporal, event, zone, semantic-scene, and explicit-verification requests. Object routes use detector observations, semantic-scene routes use the stored SigLIP segment vector index, counts use distinct supported track IDs, and numeric `before`, `after`, or `between` requests filter stored timestamps. Unsupported events abstain with a precise limitation.
 
-Detector confidence is not accuracy. Evidence below `MIN_EVIDENCE_CONFIDENCE` is excluded from detector-segment retrieval. Semantic or verification candidates remain unverified until an available verifier confirms them.
+Detector confidence, provider confidence, and vector similarity are different quantities and none is accuracy. Semantic descriptions remain visibly unverified. Verification is explicit: rejection or unavailability forces abstention, and ordinary searches do not invoke the external verifier.
 
 ## Evaluation
 
@@ -54,10 +55,10 @@ Run the unit and contract suite:
 Run the real local workflow check:
 
 ```powershell
-.\.venv\Scripts\python.exe evaluation\verify_e2e_workflow.py
+.\.venv\Scripts\python.exe evaluation\verify_e2e_workflow.py --live-provider
 ```
 
-`evaluation/ground_truth.json` is a review-gated schema. Add human-reviewed video, segment, and query annotations before reporting retrieval precision, temporal overlap, verification quality, or accuracy. Generated reports belong in `output/evaluation/` and are ignored by Git.
+`--live-provider` is required because the workflow makes real NVIDIA API calls. `evaluation/ground_truth.json` remains review-gated; add human-reviewed annotations before reporting retrieval precision, temporal overlap, verification quality, or accuracy.
 
 ## Repository hygiene
 

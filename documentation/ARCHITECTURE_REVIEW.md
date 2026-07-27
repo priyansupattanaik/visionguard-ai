@@ -32,7 +32,7 @@ Tracked source remains code, configuration templates, docs, tests, evaluation sc
 
 ## Remaining risks before production
 
-The pipeline class still contains ingestion, result preparation, verification coordination, and export methods, so a later low-risk extraction should split those into dedicated services behind the existing public interface. Retrieval accuracy cannot be claimed until human-reviewed data populates `evaluation/ground_truth.json`; detector confidence is not an accuracy metric. Optional visual verification can send content to a configured third-party provider, so it must remain opt-in and clearly disclosed. Production deployment also needs durable job storage, authentication/authorization, malware scanning for uploads, resource limits, and observability beyond local process logs.
+The pipeline class still contains ingestion, query state, verification coordination, and export methods, so a later extraction should split these behind the existing interface. Retrieval accuracy cannot be claimed until human-reviewed labels exist. Non-loopback mutations now require a configured bearer token and bounded resources, but durable multi-user authorization, persistent jobs, malware scanning, and distributed quotas remain production work.
 
 ## Validation standard
 

@@ -141,3 +141,25 @@ def test_readme_documents_primary_entry_point():
     with open("README.md", "r", encoding="utf-8") as fh:
         body = fh.read()
     assert "run.py" in body
+
+
+def test_non_loopback_mutation_requires_api_token(monkeypatch):
+    monkeypatch.delenv("VISION_GUARD_API_TOKEN", raising=False)
+    app = create_app(testing=False, start_warmup=False, pipeline=DummyPipeline())
+    client = app.test_client()
+
+    response = client.post("/api/query", json={"query": "person"}, environ_base={"REMOTE_ADDR": "10.0.0.8"})
+
+    assert response.status_code == 401
+    assert "Authentication" in response.get_json()["message"]
+
+
+def test_video_duration_limit_is_enforced(monkeypatch):
+    monkeypatch.setenv("VISION_GUARD_MAX_DURATION_SECONDS", "1")
+    app = create_app(testing=True, start_warmup=False, pipeline=DummyPipeline())
+    client = app.test_client()
+
+    response = client.post("/api/videos/upload", json={"sample": "asset3.mp4"})
+
+    assert response.status_code == 400
+    assert "duration" in response.get_json()["message"].casefold()

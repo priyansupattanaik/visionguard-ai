@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 from pathlib import Path
 
@@ -17,6 +18,9 @@ def main() -> None:
     if destination.is_file():
         print(destination)
         return
+    settings_dir = Path(".cache") / "visionguard" / "ultralytics"
+    settings_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("YOLO_CONFIG_DIR", str(settings_dir.resolve()))
     from ultralytics import YOLO
 
     model = YOLO(args.yolo)

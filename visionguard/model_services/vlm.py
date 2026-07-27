@@ -61,10 +61,10 @@ class SearchEncoder:
             self.m.eval()
             self._maybe_compile()
         except (OSError, ValueError) as exc:
-            if os.getenv("VISION_GUARD_ALLOW_EMBEDDING_FALLBACK", "1") != "1":
-                raise
-            self.fallback = True
-            self.fallback_reason = str(exc)
+            raise RuntimeError(
+                f"Required SigLIP embedding model '{self.model_name}' is unavailable. "
+                "Install or cache the configured model before indexing; VisionGuard does not use embedding fallbacks."
+            ) from exc
 
     def mode(self):
         if self.fallback:

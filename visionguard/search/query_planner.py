@@ -168,6 +168,13 @@ class DeterministicQueryPlanner:
             intent = "event_search"
         elif entities:
             intent = "object_search"
+        unsupported_events = sorted(set(events) - self.temporal_events)
+        limitations = []
+        if unsupported_events:
+            intent = "unsupported_event"
+            limitations.append(
+                "No grounded event implementation is available for: " + ", ".join(unsupported_events) + "."
+            )
 
         required = [EvidenceKind.EVENT] if events or temporal != TemporalRelation.NONE else [
             EvidenceKind.OBJECT,
@@ -186,6 +193,7 @@ class DeterministicQueryPlanner:
             unknown_terms=unknown_terms,
             retrieval_routes=routes,
             clarification=clarification,
+            limitations=limitations,
             temporal_relation=temporal,
             reference_event=events[-1] if events else None,
             requires_count=bool(self.count_words.intersection(words)),

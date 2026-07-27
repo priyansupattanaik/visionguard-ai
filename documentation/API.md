@@ -11,6 +11,7 @@ Run `.\.venv\Scripts\python.exe run.py`. The same Flask application serves the b
 | POST | `/api/videos/upload` | Store and validate an MP4, then create an uploaded `video_id` and `job_id` |
 | POST | `/api/videos/<video_id>/index` | Start the explicit decode-to-index job for an uploaded video |
 | GET | `/api/videos/<video_id>` | Real video metadata, logical chunks, and processing summary |
+| DELETE | `/api/videos/<video_id>` | Remove a non-running video's retained upload, job state, and generated run directory |
 | GET | `/api/videos/<video_id>/content` | Stream the immutable stored upload |
 | GET | `/api/videos/<video_id>/status` | Truthful job and stage states |
 | GET | `/api/videos/<video_id>/frames` | Extracted frame records with deterministic timestamps |
@@ -24,6 +25,6 @@ Run `.\.venv\Scripts\python.exe run.py`. The same Flask application serves the b
 | POST | `/api/export` | Create a report or video clip from selected evidence |
 | GET | `/api/download/<id>` | Download a registered export |
 
-This is a local application API. Do not expose it directly to untrusted networks without authentication, bounded uploads, request limits, and hardened storage.
+The API enforces byte, duration, resolution, registered-video, mutation-rate, and download-token lifetime limits. Mutating requests from non-loopback clients require `Authorization: Bearer <VISION_GUARD_API_TOKEN>`. This remains a local service; durable multi-user job persistence is not implemented.
 
-OCR, frame captioning, and video normalization are not implemented and are reported as `skipped`. Query responses contain `frames` only when the referenced JPEG exists. Without an evidence frame, the response is `insufficient_evidence: true` and the answer is the fixed insufficient-evidence statement.
+OCR, per-frame captioning, and video normalization are not implemented and are reported as `skipped`. Required segment semantic analysis has a separate live stage. Query responses contain frames only when the referenced JPEG exists; unsupported or insufficient requests abstain.

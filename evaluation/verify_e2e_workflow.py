@@ -19,15 +19,21 @@ def main() -> None:
     parser.add_argument("--video", type=Path, default=Path("sample_videos/asset3.mp4"))
     parser.add_argument("--query", default="find the person")
     parser.add_argument("--absent-query", default="find the elephant")
-    parser.add_argument("--timeout", type=float, default=90.0)
+    parser.add_argument("--timeout", type=float, default=900.0)
+    parser.add_argument("--live-provider", action="store_true", help="Acknowledge that this check makes real NVIDIA API calls")
     args = parser.parse_args()
+    from visionguard.runtime.env import load_project_env
+    load_project_env(ROOT)
 
     if not args.video.is_file():
         raise SystemExit(f"Video does not exist: {args.video}")
+    if not args.live_provider:
+        raise SystemExit("Pass --live-provider to acknowledge real NVIDIA semantic API usage.")
+    if not os.getenv("NVIDIA_API_KEY", "").strip():
+        raise SystemExit("NVIDIA_API_KEY must be configured for the mandatory semantic stage.")
 
     os.environ["VISION_GUARD_SKIP_WARMUP"] = "1"
     os.environ["VERIFIER_READY_TIMEOUT"] = "0"
-    os.environ["NVIDIA_API_KEY"] = " "  # Keep this local verification independent of hosted APIs.
 
     from visionguard.web_app.server import create_app
 
@@ -38,9 +44,12 @@ def main() -> None:
         data={"video": (io.BytesIO(args.video.read_bytes()), "cctv-real-upload.mp4")},
         content_type="multipart/form-data",
     )
-    if upload.status_code != 202:
+    if upload.status_code != 201:
         raise RuntimeError(f"Upload failed: {upload.status_code} {upload.get_data(as_text=True)}")
     identifiers = upload.get_json()
+    index_response = client.post(f"/api/videos/{identifiers['video_id']}/index")
+    if index_response.status_code != 202:
+        raise RuntimeError(f"Index start failed: {index_response.status_code} {index_response.get_data(as_text=True)}")
 
     snapshots = []
     deadline = time.time() + args.timeout
@@ -79,6 +88,7 @@ def main() -> None:
 
     result = {
         "upload_http": upload.status_code,
+        "index_http": index_response.status_code,
         "video_id": identifiers["video_id"],
         "job_id": identifiers["job_id"],
         "filename": identifiers["filename"],
@@ -104,6 +114,7 @@ def main() -> None:
         "query_has_evidence": bool(found.get("frames")) and found.get("insufficient_evidence") is False,
         "absent_query_is_insufficient": absent.get("frames") == [] and absent.get("insufficient_evidence") is True,
         "all_stages_terminal": all(stage["status"] in {"completed", "skipped"} for stage in status["stages"]),
+        "semantic_stage_completed": next(stage for stage in status["stages"] if stage["name"] == "semantic_analysis")["status"] == "completed",
         "timestamp_formula_valid": result["timestamp_formula_valid"],
         "all_image_urls_ok": result["all_image_urls_ok"],
     }

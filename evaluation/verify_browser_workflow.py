@@ -67,7 +67,9 @@ class DevTools:
     def evaluate(self, expression: str):
         result = self.call("Runtime.evaluate", {"expression": expression, "returnByValue": True, "awaitPromise": True})
         if result.get("exceptionDetails"):
-            raise RuntimeError(result["exceptionDetails"].get("text", "Evaluation failed"))
+            details = result["exceptionDetails"]
+            description = details.get("exception", {}).get("description")
+            raise RuntimeError(description or details.get("text", "Evaluation failed"))
         return result.get("result", {}).get("value")
 
 
@@ -85,11 +87,19 @@ def wait_http(url: str, timeout: float = 20.0) -> None:
 
 def wait_until(devtools: DevTools, expression: str, timeout: float, description: str) -> None:
     deadline = time.time() + timeout
+    last_error = None
     while time.time() < deadline:
-        if devtools.evaluate(expression):
-            return
+        try:
+            if devtools.evaluate(expression):
+                return
+            last_error = None
+        except RuntimeError as exc:
+            # Page transitions can briefly invalidate the execution context.
+            # Retry until the deadline, but retain the concrete browser error.
+            last_error = exc
         time.sleep(0.25)
-    raise RuntimeError(f"Timed out waiting for {description}")
+    suffix = f" Last browser error: {last_error}" if last_error else ""
+    raise RuntimeError(f"Timed out waiting for {description}.{suffix}")
 
 
 def main() -> None:
@@ -110,10 +120,6 @@ def main() -> None:
         "VISION_GUARD_PORT": str(args.server_port),
         "VISION_GUARD_SKIP_WARMUP": "1",
         "VERIFIER_READY_TIMEOUT": "0",
-        "MODEL_PROVIDER": "llama_cpp",
-        "LLAMA_CPP_TEXT_URL": "http://127.0.0.1:8080",
-        "LLAMA_CPP_VISION_URL": "http://127.0.0.1:8081",
-        "NVIDIA_API_KEY": " ",
         "PYTHONDONTWRITEBYTECODE": "1",
     })
     server = subprocess.Popen(
@@ -154,16 +160,21 @@ def main() -> None:
             input_node = devtools.call("DOM.querySelector", {"nodeId": document, "selector": "#videoUpload"})["nodeId"]
             devtools.call("DOM.setFileInputFiles", {"nodeId": input_node, "files": [str(video)]})
             devtools.evaluate("document.querySelector('#videoUpload').dispatchEvent(new Event('change', {bubbles:true})); document.querySelector('#scanForm').requestSubmit(); true")
-
-            wait_until(devtools, "document.querySelector('#queryInput').disabled === false", 120, "query-ready state")
+            wait_until(devtools, "document.querySelector('#indexButton').disabled === false", 30, "index button readiness")
+            devtools.evaluate("document.querySelector('#indexButton').click(); true")
+            try:
+                wait_until(devtools, "document.querySelector('#queryInput')?.disabled === false", 1200, "query-ready state")
+            except RuntimeError as exc:
+                diagnostics = devtools.evaluate("({scanStatus:document.querySelector('#scanStatus')?.textContent, progress:document.querySelector('#scanProgressLabel')?.textContent, stages:[...document.querySelectorAll('#processingTimeline .stage-row')].map(x=>x.textContent), lastEvent:document.querySelector('#backendConsole li:last-child')?.textContent, bodyReady:document.readyState})")
+                raise RuntimeError(f"{exc} UI diagnostics: {json.dumps(diagnostics)} API responses: {json.dumps(devtools.api_responses[-12:])}") from exc
             wait_until(devtools, "document.querySelectorAll('#evidenceStrip .evidence-thumb').length > 0", 20, "real evidence thumbnails")
             devtools.evaluate(f"document.querySelector('#queryInput').value = {json.dumps(args.query)}; document.querySelector('#queryButton').click(); true")
             wait_until(devtools, "document.querySelectorAll('#resultsList .match-card').length > 0", 60, "evidence-backed query results")
             wait_until(devtools, "document.querySelector('#resultsList .match-card__image')?.complete === true", 20, "result image load")
-            devtools.evaluate("document.querySelectorAll('#resultsList .match-card__content')[1].click(); true")
+            devtools.evaluate("document.querySelectorAll('#resultsList .match-card__content')[0].click(); true")
             time.sleep(0.5)
 
-            desktop = devtools.evaluate("({queryDisabled:document.querySelector('#queryInput').disabled, stages:[...document.querySelectorAll('#processingTimeline .stage-row small')].map(x=>x.textContent), evidenceCount:document.querySelectorAll('#evidenceStrip .evidence-thumb').length, eventCount:document.querySelectorAll('#backendConsole li').length, resultCount:document.querySelectorAll('#resultsList .match-card').length, resultTitle:document.querySelectorAll('#resultsList .match-card__content strong')[1].textContent, inspectorVisible:getComputedStyle(document.querySelector('#frameInspector')).display !== 'none', videoTime:document.querySelector('#videoPreview').currentTime, imageWidth:document.querySelector('#resultsList .match-card__image').naturalWidth, provider:document.querySelector('#providerName').textContent, textModel:document.querySelector('#textModelStatus').textContent, visionModel:document.querySelector('#visionModelStatus').textContent, bodyText:document.body.innerText})")
+            desktop = devtools.evaluate("({queryDisabled:document.querySelector('#queryInput').disabled, stages:[...document.querySelectorAll('#processingTimeline .stage-row small')].map(x=>x.textContent), evidenceCount:document.querySelectorAll('#evidenceStrip .evidence-thumb').length, eventCount:document.querySelectorAll('#backendConsole li').length, resultCount:document.querySelectorAll('#resultsList .match-card').length, resultTitle:document.querySelectorAll('#resultsList .match-card__content strong')[0].textContent, inspectorVisible:getComputedStyle(document.querySelector('#frameInspector')).display !== 'none', videoTime:document.querySelector('#videoPreview').currentTime, imageWidth:document.querySelector('#resultsList .match-card__image').naturalWidth, provider:document.querySelector('#providerName').textContent, textModel:document.querySelector('#textModelStatus').textContent, visionModel:document.querySelector('#visionModelStatus').textContent, bodyText:document.body.innerText})")
             expected_seconds = float(desktop["resultTitle"].split("s", 1)[0])
             if args.screenshot:
                 screenshot_path = args.screenshot.resolve()
@@ -216,9 +227,6 @@ def main() -> None:
                 result["result_image_width"] > 0,
                 result["frame_inspector_visible"],
                 result["seek_matches_result"],
-                result["provider"] == "llama.cpp",
-                result["text_model_status"] == "Disconnected",
-                result["vision_model_status"] == "Disconnected",
                 result["insufficient_query_is_grounded"],
                 result["ocr_marked_skipped"],
                 result["captioning_marked_skipped"],

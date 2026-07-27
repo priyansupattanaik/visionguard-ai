@@ -1,5 +1,6 @@
 """Evidence-frame verifier for selected llama.cpp vision or optional NVIDIA VLM."""
 import base64
+import hashlib
 import json
 import mimetypes
 import os
@@ -14,6 +15,7 @@ from visionguard.model_services.model_provider import OpenAICompatibleProvider
 
 
 class NvidiaFrameVerifier:
+    PROMPT_VERSION = "verify-cctv-v2"
     def __init__(self, model=None, timeout=None):
         self.selected_provider = os.getenv("MODEL_PROVIDER", "none").strip().casefold()
         if self.selected_provider == "llama_cpp":
@@ -61,10 +63,13 @@ class NvidiaFrameVerifier:
             self._ready = False
             self._last_error = None
             return False
-        self.backend = self.available_mode
-        self._ready = True
-        self._last_error = None
-        return True
+        result = OpenAICompatibleProvider(
+            "nvidia", self.base_url, self.model_name, api_key=self.api_key, timeout=min(self.timeout, 5.0)
+        ).health()
+        self._ready = bool(result.get("reachable"))
+        self._last_error = None if self._ready else result.get("message", "NVIDIA endpoint is unavailable.")
+        self.backend = self.available_mode if self._ready else "unavailable"
+        return self._ready
 
     def verification_mode(self):
         if self.available_mode == "verification_disabled":
@@ -181,7 +186,19 @@ class NvidiaFrameVerifier:
     def verify_query(self, frame_path, query, frame_key=None):
         if not self.is_ready():
             return self._empty_result(self.verification_mode())
-        key = (frame_key or frame_path, " ".join(query.lower().split()))
+        try:
+            with open(frame_path, "rb") as image_file:
+                image_digest = hashlib.sha256(image_file.read()).hexdigest()
+        except OSError:
+            return self._empty_result(self.verification_mode())
+        key = (
+            frame_key or frame_path,
+            image_digest,
+            self.selected_provider,
+            self.model_name,
+            self.PROMPT_VERSION,
+            " ".join(query.lower().split()),
+        )
         with self.lock:
             if key in self.cache:
                 return dict(self.cache[key])

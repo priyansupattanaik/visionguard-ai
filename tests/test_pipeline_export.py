@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from visionguard.video_pipeline.video_pipeline import VisionGuardPipeline
+from visionguard.model_services.report_generator import ReportGenerator
+from visionguard.model_services.segmenter import GroundedSegmenter
 
 
 class FakeClip:
@@ -57,3 +59,33 @@ def test_export_falls_back_to_raw_clip_when_segmentation_fails(tmp_path):
     assert Path(result["files"]["zip"]).exists()
     assert Path(result["files"]["html"]).exists()
     assert Path(result["files"]["csv"]).exists()
+
+
+def test_html_report_autoescapes_user_and_model_text(tmp_path):
+    report = ReportGenerator(tmp_path)
+    path = report.write_html(tmp_path / "report.html", {
+        "query": '<script>alert("query")</script>',
+        "video": "video.mp4",
+        "hits": [{"start": 0.0, "end": 1.0, "score": 0.5, "summary": '<img src=x onerror=alert("summary")>', "objects": [], "clip": ""}],
+    })
+
+    html = Path(path).read_text(encoding="utf-8")
+    assert "<script>" not in html
+    assert "<img src=x" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_segmenter_does_not_fabricate_confidence_for_boxes(tmp_path):
+    class BoxVerifier:
+        @staticmethod
+        def ground_phrase(*_args, **_kwargs):
+            return [[1, 2, 10, 12]]
+
+    segmenter = GroundedSegmenter(verifier=BoxVerifier())
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"not-read-by-this-test")
+
+    boxes, scores, _texts = segmenter.detect(str(frame_path), "person")
+
+    assert boxes == [[1, 2, 10, 12]]
+    assert scores == [None]

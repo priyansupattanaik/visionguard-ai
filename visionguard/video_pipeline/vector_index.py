@@ -129,3 +129,13 @@ class SegmentVectorIndex:
         sims = self.vecs @ q[0]
         order = np.argsort(-sims)[:k]
         return sims[order].astype(np.float32), self.ids[order]
+
+    def snapshot(self):
+        """Return an immutable-by-convention copy for a video-scoped snapshot."""
+        clone = SegmentVectorIndex(bit_width=self.bit_width)
+        clone.idx = self.idx
+        clone.ids = self.ids.copy()
+        clone.vecs = self.vecs.copy()
+        clone.path = self.path
+        clone.backend = self.backend
+        return clone

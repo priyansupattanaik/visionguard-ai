@@ -3,6 +3,8 @@ import json
 from urllib.error import HTTPError, URLError
 
 import pytest
+import cv2
+import numpy as np
 
 from visionguard.model_services.model_provider import (
     LlamaCppProvider,
@@ -10,8 +12,10 @@ from visionguard.model_services.model_provider import (
     NoneModelProvider,
     OpenAICompatibleProvider,
     create_model_provider,
+    model_health_snapshot,
 )
 from visionguard.model_services.nvidia_verifier import NvidiaFrameVerifier
+from visionguard.semantic.nvidia_semantic import NvidiaSemanticAnalyzer
 
 
 class FakeResponse:
@@ -103,8 +107,73 @@ def test_missing_nvidia_key_is_irrelevant_in_llama_mode(monkeypatch):
 def test_nvidia_verifier_warms_when_first_used(monkeypatch):
     monkeypatch.setenv("MODEL_PROVIDER", "nvidia")
     monkeypatch.setenv("NVIDIA_API_KEY", "configured-in-test-only")
+    monkeypatch.setattr(
+        "visionguard.model_services.nvidia_verifier.OpenAICompatibleProvider.health",
+        lambda _self: {"configured": True, "reachable": True, "message": "reachable"},
+    )
     verifier = NvidiaFrameVerifier()
 
     assert verifier.backend == "unconfigured"
     assert verifier.is_ready() is True
     assert verifier.verification_mode() == "nvidia_api"
+
+
+def test_nvidia_health_reports_the_shared_multimodal_endpoint():
+    class ReachableNvidiaProvider:
+        provider_name = "nvidia"
+
+        @staticmethod
+        def health():
+            return {
+                "configured": True,
+                "reachable": True,
+                "url": "https://integrate.api.nvidia.com/v1",
+                "message": "nvidia endpoint is reachable.",
+            }
+
+    health = model_health_snapshot(ReachableNvidiaProvider())
+
+    assert health["text_model"]["reachable"] is True
+    assert health["vision_model"]["reachable"] is True
+    assert health["vision_model"]["message"] == "NVIDIA multimodal endpoint is reachable."
+
+
+def test_semantic_health_requires_an_authenticated_live_response(monkeypatch):
+    requests = []
+
+    def opener(request, timeout):
+        requests.append(request)
+        assert request.headers["Authorization"] == "Bearer configured-in-test-only"
+        return FakeResponse({"data": [{"id": "model"}]})
+
+    monkeypatch.setattr("visionguard.semantic.nvidia_semantic.urlopen", opener)
+    analyzer = NvidiaSemanticAnalyzer(
+        "configured-in-test-only", "https://provider.example/v1", "model", timeout=2
+    )
+
+    health = analyzer.health()
+
+    assert health["ready"] is True
+    assert requests[0].full_url == "https://provider.example/v1/models"
+
+
+def test_verifier_cache_is_scoped_to_image_content(tmp_path, monkeypatch):
+    monkeypatch.setenv("MODEL_PROVIDER", "nvidia")
+    monkeypatch.setenv("NVIDIA_API_KEY", "configured-in-test-only")
+    verifier = NvidiaFrameVerifier()
+    verifier._ready = True
+    verifier.backend = "nvidia_api"
+    calls = []
+    verifier._ask = lambda frame_path, _prompt: calls.append(frame_path) or json.dumps({
+        "matched": True, "confidence": 0.9, "description": "visible", "boxes": [[0, 0, 5, 5]],
+    })
+    first = np.zeros((10, 10, 3), dtype=np.uint8)
+    second = np.full((10, 10, 3), 255, dtype=np.uint8)
+    first_path, second_path = tmp_path / "first.jpg", tmp_path / "second.jpg"
+    assert cv2.imwrite(str(first_path), first)
+    assert cv2.imwrite(str(second_path), second)
+
+    verifier.verify_query(str(first_path), "person", frame_key="video:frame:0")
+    verifier.verify_query(str(second_path), "person", frame_key="video:frame:0")
+
+    assert len(calls) == 2
