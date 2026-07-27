@@ -160,7 +160,11 @@ def main() -> None:
             input_node = devtools.call("DOM.querySelector", {"nodeId": document, "selector": "#videoUpload"})["nodeId"]
             devtools.call("DOM.setFileInputFiles", {"nodeId": input_node, "files": [str(video)]})
             devtools.evaluate("document.querySelector('#videoUpload').dispatchEvent(new Event('change', {bubbles:true})); document.querySelector('#scanForm').requestSubmit(); true")
-            wait_until(devtools, "document.querySelector('#indexButton').disabled === false", 30, "index button readiness")
+            try:
+                wait_until(devtools, "document.querySelector('#indexButton')?.disabled === false", 120, "index button readiness")
+            except RuntimeError as exc:
+                diagnostics = devtools.evaluate("({scanStatus:document.querySelector('#scanStatus')?.textContent, modelNotice:document.querySelector('#modelNotice')?.textContent, nvidia:document.querySelector('#nvidiaStatus')?.textContent, provider:document.querySelector('#providerName')?.textContent, bodyReady:document.readyState})")
+                raise RuntimeError(f"{exc} UI diagnostics: {json.dumps(diagnostics)} API responses: {json.dumps(devtools.api_responses[-12:])}") from exc
             devtools.evaluate("document.querySelector('#indexButton').click(); true")
             try:
                 wait_until(devtools, "document.querySelector('#queryInput')?.disabled === false", 1200, "query-ready state")

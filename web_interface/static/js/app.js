@@ -1,6 +1,8 @@
 (() => {
   "use strict";
 
+  const ACTIVE_SESSION_KEY = "visionguard-active-video-job";
+
   const state = {
     videoId: null,
     jobId: null,
@@ -67,6 +69,27 @@
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data.ok === false) throw new Error(data.message || `Request failed with ${response.status}`);
     return data;
+  }
+
+  function persistActiveSession(filename, sourceUrl) {
+    try {
+      window.sessionStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify({
+        videoId: state.videoId,
+        jobId: state.jobId,
+        filename,
+        sourceUrl,
+      }));
+    } catch (error) {
+      console.warn("Active job state could not be persisted for reload recovery.", error);
+    }
+  }
+
+  function clearActiveSession() {
+    try {
+      window.sessionStorage.removeItem(ACTIVE_SESSION_KEY);
+    } catch (error) {
+      console.warn("Active job state could not be cleared.", error);
+    }
   }
 
   function waitForPoll(milliseconds) {
@@ -373,6 +396,7 @@
 
   async function submitVideo(event) {
     event.preventDefault();
+    clearActiveSession();
     setSearchReady(false);
     setButtonLoading(els.scanButton, true);
     setMessage(els.scanStatus, "Uploading video to the backend.", "scanning");
@@ -396,6 +420,7 @@
       state.videoId = upload.video_id;
       state.jobId = upload.job_id;
       showVideoPreview(upload.source_url, upload.filename);
+      persistActiveSession(upload.filename, upload.source_url);
       if (els.indexButton) els.indexButton.disabled = !state.detectorReady || !state.semanticReady;
       setMessage(
         els.scanStatus,
@@ -410,6 +435,49 @@
       showToast(error.message, "error");
     } finally {
       setButtonLoading(els.scanButton, false);
+    }
+  }
+
+  async function restoreActiveSession() {
+    let saved;
+    try {
+      saved = JSON.parse(window.sessionStorage.getItem(ACTIVE_SESSION_KEY) || "null");
+    } catch (error) {
+      clearActiveSession();
+      return;
+    }
+    if (!saved?.videoId || !saved?.jobId) return;
+
+    state.videoId = saved.videoId;
+    state.jobId = saved.jobId;
+    state.lastEventId = 0;
+    try {
+      const video = await fetchJson(`/api/videos/${state.videoId}`);
+      showVideoPreview(video.source_url || saved.sourceUrl, video.filename || saved.filename);
+      const status = await fetchJson(`/api/videos/${state.videoId}/status`);
+      renderStages(status.stages);
+      await loadJobEvents().catch((error) => console.warn("Backend event recovery failed.", error));
+      await refreshFrames().catch((error) => console.warn("Evidence thumbnail recovery failed.", error));
+      if (status.status === "completed") {
+        setSearchReady(true);
+        setMessage(els.scanStatus, "Processing completed. Evidence index is query-ready.", "success");
+        if (els.zeroQueryPanel) els.zeroQueryPanel.style.display = "";
+        return;
+      }
+      if (status.status === "failed") {
+        setSearchReady(false);
+        setMessage(els.scanStatus, status.error || "Video processing failed.", "error");
+        return;
+      }
+      setSearchReady(false);
+      setMessage(els.scanStatus, "Restored the active indexing job after page reload.", "scanning");
+      await pollProcessing();
+    } catch (error) {
+      clearActiveSession();
+      state.videoId = null;
+      state.jobId = null;
+      setSearchReady(false);
+      setMessage(els.scanStatus, `The previous job could not be restored: ${error.message}`, "error");
     }
   }
 
@@ -569,8 +637,11 @@
     els.videoUpload.dispatchEvent(new Event("change"));
   });
 
-  setSearchReady(false);
-  loadAssets().catch((error) => setMessage(els.scanStatus, error.message, "error"));
-  loadStatus();
-  loadModelHealth();
+  async function initialize() {
+    setSearchReady(false);
+    await Promise.allSettled([loadAssets(), loadStatus(), loadModelHealth()]);
+    await restoreActiveSession();
+  }
+
+  initialize();
 })();
