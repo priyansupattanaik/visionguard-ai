@@ -32,13 +32,24 @@ from google.colab import userdata
 import os
 os.environ["NVIDIA_API_KEY"] = userdata.get("NVIDIA_API_KEY")
 
-# 3) Install
+# 3) Install (removes Colab's preinstalled Gradio, which conflicts with transformers 4.x)
 !apt-get -qq update && apt-get -qq install -y libgl1 libglib2.0-0 > /dev/null
-!pip -q install -r requirements.txt
+!python scripts/colab_install.py
 
 # 4) Fast GPU end-to-end (asset3 ~12s is the speed demo)
 !python scripts/run_colab_e2e.py --video sample_videos/asset3.mp4 --query "find the person" --absent-query "find the elephant"
 ```
+
+### Gradio / huggingface-hub conflict
+
+Colab ships Gradio 6.x (`huggingface-hub>=1.2`). VisionGuard uses **transformers 4.x** (`huggingface-hub<1`). VisionGuard does **not** use Gradio (Flask UI only). Always install with:
+
+```bash
+python scripts/colab_install.py
+```
+
+Do **not** use bare `pip install -r requirements.txt` on Colab without uninstalling Gradio first.
+
 
 Expected result:
 

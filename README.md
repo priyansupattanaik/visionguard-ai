@@ -43,11 +43,13 @@ The bootstrap command downloads a model into ignored `.models/`; it is intention
 For a Colab T4/A100 session with evidence-first answers (detector object hits + mandatory abstention on absent objects):
 
 1. Runtime → **GPU**
-2. Open `notebooks/visionguard_colab.ipynb` or follow `documentation/COLAB.md`
-3. Store `NVIDIA_API_KEY` in Colab Secrets
-4. Run:
+2. Clone the repo, then install with `python scripts/colab_install.py` (uninstalls Colab’s Gradio so it does not conflict with `huggingface-hub` 0.x)
+3. Open `notebooks/visionguard_colab.ipynb` or follow `documentation/COLAB.md`
+4. Store `NVIDIA_API_KEY` in Colab Secrets
+5. Run:
 
 ```bash
+python scripts/colab_install.py
 python scripts/run_colab_e2e.py --video sample_videos/asset3.mp4 --query "find the person" --absent-query "find the elephant"
 ```
 

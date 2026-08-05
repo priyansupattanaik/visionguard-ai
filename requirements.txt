@@ -5,7 +5,9 @@ ultralytics>=8.3.0
 lap>=0.5.13
 torch>=2.4.0
 torchvision>=0.19.0
+# transformers 4.x requires huggingface-hub 0.x (not Gradio 6's hub>=1.2).
 transformers>=4.57.0,<5.0.0
+huggingface-hub>=0.34.0,<1.0
 accelerate>=1.0.0
 decord>=0.6.0
 opencv-python>=4.9.0.80
@@ -19,5 +21,6 @@ pytest>=8.0.0
 pygments>=2.18.0
 websocket-client>=1.8.0
 
-# Legacy/optional (for legacy/app_gradio.py)
-# gradio>=5.0.0
+# Gradio is NOT a dependency. On Google Colab, uninstall the preinstalled
+# Gradio stack first (it conflicts with huggingface-hub 0.x):
+#   python scripts/colab_install.py
