@@ -2,4 +2,8 @@
 
 General runtime settings live in the project-root `.env`. Optional provider credentials live in `configuration/provider_keys.env`, which is ignored by Git and loaded automatically.
 
-Local llama.cpp is the default reasoning provider and requires no API key. `NVIDIA_API_KEY` and `GROQ_API_KEY` are optional and are read only when their provider is selected. The system continues to upload, extract frames, detect objects, and perform detector-backed retrieval when every language-model provider is unavailable. `HF_TOKEN` is needed only for gated Hugging Face downloads.
+**Semantic indexing** requires `SEMANTIC_PROVIDER=nvidia` and a live `NVIDIA_API_KEY`. Invalid or unavailable NVIDIA responses fail the index job; there is no silent semantic fallback.
+
+**Optional** `MODEL_PROVIDER` (`none` | `llama_cpp` | `nvidia` | `groq`) controls reasoning / visual verification only. With `MODEL_PROVIDER=none`, detector-backed object retrieval still works after a successful index. `HF_TOKEN` is needed only for gated Hugging Face downloads.
+
+For Google Colab GPU, start from `configuration/colab_fast.env.example` and `documentation/COLAB.md`.

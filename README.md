@@ -38,6 +38,21 @@ Open `http://127.0.0.1:7860`. Upload an MP4, review its metadata, start indexing
 
 The bootstrap command downloads a model into ignored `.models/`; it is intentionally not source-controlled. Use `yolo11n.pt` if CPU throughput matters more than small-object recall, or `yolo11m.pt` for the balanced local profile.
 
+## Google Colab (GPU, fast profile)
+
+For a Colab T4/A100 session with evidence-first answers (detector object hits + mandatory abstention on absent objects):
+
+1. Runtime → **GPU**
+2. Open `notebooks/visionguard_colab.ipynb` or follow `documentation/COLAB.md`
+3. Store `NVIDIA_API_KEY` in Colab Secrets
+4. Run:
+
+```bash
+python scripts/run_colab_e2e.py --video sample_videos/asset3.mp4 --query "find the person" --absent-query "find the elephant"
+```
+
+The Colab profile uses YOLO nano, larger `WIN_SEC`, parallel `SEMANTIC_WORKERS`, and `MODEL_PROVIDER=none`. Object answers remain detector-grounded; NVIDIA segment text stays unlabeled as verified fact. Perfect zero ML error is not possible—correct abstention on missing evidence is the anti-hallucination contract.
+
 ## Query contract
 
 The LangGraph query brain routes object, count, numeric temporal, event, zone, semantic-scene, and explicit-verification requests. Object routes use detector observations, semantic-scene routes use the stored SigLIP segment vector index, counts use distinct supported track IDs, and numeric `before`, `after`, or `between` requests filter stored timestamps. Unsupported events abstain with a precise limitation.

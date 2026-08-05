@@ -944,6 +944,8 @@ class VisionGuardPipeline:
         # Semantic enrichment is a required stage. It is intentionally invoked
         # after evidence-frame writes complete, so every caption remains tied to
         # a durable source image and an exact segment interval.
+        # Concurrent workers only accelerate I/O-bound NVIDIA calls; every segment
+        # still fails the job on invalid/unavailable responses (no silent skip).
         analyzer = NvidiaSemanticAnalyzer(
             api_key=os.getenv("NVIDIA_API_KEY", ""),
             base_url=os.getenv("NVIDIA_API_BASE_URL", ""),
@@ -952,7 +954,14 @@ class VisionGuardPipeline:
         )
         semantic_started = time.perf_counter()
         semantic_total = len(self.idx["segments"])
-        for semantic_index, segment in enumerate(self.idx["segments"], 1):
+        try:
+            semantic_workers = int(os.getenv("SEMANTIC_WORKERS", "4"))
+        except ValueError:
+            semantic_workers = 4
+        semantic_workers = max(1, min(semantic_workers, 16, max(1, semantic_total)))
+
+        def _analyze_segment(item):
+            index, segment = item
             semantic = analyzer.analyze(
                 segment["frame_path"],
                 objects=segment["objects"],
@@ -964,10 +973,29 @@ class VisionGuardPipeline:
             semantic["claim_provenance"] = "nvidia_semantic"
             semantic["supporting_frame_path"] = segment["frame_path"]
             semantic["detector_context"] = {"objects": list(segment["objects"]), "tracks": list(segment["tracks"])}
-            segment["semantic"] = semantic
-            segment["tags"] = sorted(set(semantic["scene_tags"]) | set(semantic["event_tags"]))
-            yield {"kind": "semantic_progress", "processed": semantic_index, "total": semantic_total,
-                   "message": f"NVIDIA semantic analysis completed segment {semantic_index} of {semantic_total}."}
+            return index, semantic
+
+        completed = 0
+        with ThreadPoolExecutor(max_workers=semantic_workers) as semantic_pool:
+            futures = [
+                semantic_pool.submit(_analyze_segment, (index, segment))
+                for index, segment in enumerate(self.idx["segments"])
+            ]
+            for future in futures:
+                index, semantic = future.result()
+                segment = self.idx["segments"][index]
+                segment["semantic"] = semantic
+                segment["tags"] = sorted(set(semantic["scene_tags"]) | set(semantic["event_tags"]))
+                completed += 1
+                yield {
+                    "kind": "semantic_progress",
+                    "processed": completed,
+                    "total": semantic_total,
+                    "message": (
+                        f"NVIDIA semantic analysis completed segment {completed} of {semantic_total} "
+                        f"(workers={semantic_workers})."
+                    ),
+                }
         timings["semantic_analysis"] = time.perf_counter() - semantic_started
         extractor = EventExtractor(self.settings.semantic_zones, self.settings.semantic_min_dwell_seconds)
         self.semantic_events = extractor.extract(self.idx["frames"], vr.width, vr.height)
